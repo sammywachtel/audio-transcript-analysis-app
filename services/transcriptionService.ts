@@ -62,17 +62,26 @@ export class TranscriptionService {
     const model = "gemini-2.5-flash";
 
     const prompt = `
-      You are an expert transcriber and analyst. Process the attached audio file.
+      You are an expert transcriber. Process the attached audio file with PRECISE timing.
+
+      CRITICAL TIMESTAMP REQUIREMENTS:
+      - Timestamps must be in MILLISECONDS from the START of the audio (0ms = beginning)
+      - Each segment's startMs must be the EXACT moment the speaker begins that segment
+      - Each segment's endMs must be the EXACT moment the speaker finishes that segment
+      - Timestamps must match the actual audio timing - if text is spoken at 0:37, startMs should be 37000
+      - The first segment should start at or very close to 0ms (when speech actually begins)
+      - Segments should be contiguous: one segment's endMs should equal the next segment's startMs (or be very close)
+      - Do NOT pad or estimate - use the actual audio timing
 
       Tasks:
-      1. Transcribe the conversation verbatim.
-      2. Identify different speakers (e.g., Speaker 1, Speaker 2) and attribute each segment to them.
-      3. Segment the text based on natural pauses or speaker changes. Provide accurate start and end timestamps in milliseconds.
-      4. Identify technical terms, acronyms, or complex concepts mentioned. Provide a clear, short definition for each based on the context.
-      5. Identify the main topics and any tangents.
-      6. Identify people mentioned in the conversation (distinct from the speakers themselves, if possible). Extract their full name and inferred affiliation/organization/role.
+      1. Transcribe verbatim with ACCURATE timestamps in milliseconds.
+      2. Identify speakers (Speaker 1, Speaker 2, etc.) and attribute each segment.
+      3. Segment based on natural pauses or speaker changes. Keep segments reasonably short (5-30 seconds each).
+      4. Extract technical terms/acronyms with brief definitions based on context.
+      5. Identify main topics and tangents.
+      6. List people mentioned (not the speakers) with their inferred affiliation.
 
-      Populate the JSON schema provided in the configuration.
+      Populate the JSON schema provided.
     `;
 
     const response = await this.ai.models.generateContent({
