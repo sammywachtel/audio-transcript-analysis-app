@@ -37,6 +37,8 @@ Replace these placeholder values with your own:
 
 ## Step 1: Enable Required APIs
 
+**IMPORTANT**: These APIs must be enabled before deployment will work. The Cloud Build API in particular is required for building container images.
+
 ```bash
 gcloud services enable \
   iamcredentials.googleapis.com \
@@ -45,6 +47,21 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   --project=your-gcp-project-id
 ```
+
+Or enable APIs individually:
+
+```bash
+gcloud services enable cloudbuild.googleapis.com --project=your-gcp-project-id
+gcloud services enable run.googleapis.com --project=your-gcp-project-id
+gcloud services enable iamcredentials.googleapis.com --project=your-gcp-project-id
+gcloud services enable artifactregistry.googleapis.com --project=your-gcp-project-id
+```
+
+Console links (alternative):
+- [Cloud Build API](https://console.developers.google.com/apis/api/cloudbuild.googleapis.com/overview)
+- [Cloud Run API](https://console.developers.google.com/apis/api/run.googleapis.com/overview)
+- [IAM Credentials API](https://console.developers.google.com/apis/api/iamcredentials.googleapis.com/overview)
+- [Artifact Registry API](https://console.developers.google.com/apis/api/artifactregistry.googleapis.com/overview)
 
 ## Step 2: Create Workload Identity Pool
 
@@ -111,11 +128,31 @@ projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/pr
 3. Click **Create and Continue**
 4. Grant these roles (click "Add Another Role" between each):
    - `Cloud Run Admin` - Deploy and manage Cloud Run services
-   - `Cloud Build Editor` - Submit and manage Cloud Build jobs
-   - `Artifact Registry Writer` - Push container images
    - `Service Account User` - Act as service accounts (required for Cloud Run)
-   - `Storage Admin` - Store build artifacts in Cloud Storage
 5. Click **Done**
+
+### Grant Additional Project-Level Permissions
+
+The service account needs additional project-level IAM bindings for Cloud Build and Storage access. These are best granted via gcloud CLI:
+
+```bash
+# Grant Cloud Build Editor role (required to submit builds)
+gcloud projects add-iam-policy-binding your-gcp-project-id \
+  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --role="roles/cloudbuild.builds.editor"
+
+# Grant Storage Admin role (required to upload build source and artifacts)
+gcloud projects add-iam-policy-binding your-gcp-project-id \
+  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --role="roles/storage.admin"
+
+# Grant Artifact Registry Writer role (required to push container images)
+gcloud projects add-iam-policy-binding your-gcp-project-id \
+  --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+```
+
+> **Note**: These roles can also be granted via the console under IAM & Admin > IAM, but the gcloud CLI approach is more reliable and easier to verify.
 
 **Note your Service Account Email** (format):
 ```
@@ -287,16 +324,35 @@ The service account exists but Workload Identity can't impersonate it:
 3. Ensure `id-token: write` permission is set in the workflow
 4. Check the attribute condition in the provider matches your repo exactly (case-sensitive)
 
-### Cloud Build fails
+### "Cloud Build API has not been used in project" (PERMISSION_DENIED)
 
-1. Check Cloud Build API is enabled:
+The Cloud Build API needs to be enabled before you can submit builds:
+
+1. Enable the API via CLI:
    ```bash
    gcloud services enable cloudbuild.googleapis.com --project=your-gcp-project-id
    ```
-2. Verify the service account has these roles:
-   - `Cloud Build Editor`
-   - `Storage Admin`
-3. Grant missing roles:
+2. Or enable via console: [Cloud Build API](https://console.developers.google.com/apis/api/cloudbuild.googleapis.com/overview?project=your-project-number)
+3. Wait 1-2 minutes for the API to propagate, then retry the build
+
+### "Forbidden from accessing the bucket" or Cloud Build storage errors
+
+This means the service account lacks Storage Admin permissions:
+
+1. Grant Storage Admin role:
+   ```bash
+   gcloud projects add-iam-policy-binding your-gcp-project-id \
+     --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+     --role="roles/storage.admin"
+   ```
+
+### Cloud Build fails with other errors
+
+1. Verify the service account has these roles:
+   - `Cloud Build Editor` - to submit builds
+   - `Storage Admin` - to upload source and store artifacts
+   - `Artifact Registry Writer` - to push container images
+2. Grant missing roles:
    ```bash
    gcloud projects add-iam-policy-binding your-gcp-project-id \
      --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
@@ -305,6 +361,10 @@ The service account exists but Workload Identity can't impersonate it:
    gcloud projects add-iam-policy-binding your-gcp-project-id \
      --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
      --role="roles/storage.admin"
+
+   gcloud projects add-iam-policy-binding your-gcp-project-id \
+     --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+     --role="roles/artifactregistry.writer"
    ```
 
 ### Cloud Run deployment fails

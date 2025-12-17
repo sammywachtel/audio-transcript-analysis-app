@@ -20,7 +20,10 @@ COPY . .
 
 # Build argument for Gemini API key (injected at build time)
 ARG VITE_GEMINI_API_KEY
-ENV VITE_GEMINI_API_KEY=$VITE_GEMINI_API_KEY
+
+# Create .env file for Vite's loadEnv() to read
+# vite.config.ts expects GEMINI_API_KEY (without VITE_ prefix)
+RUN echo "GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" > .env
 
 # Build the application
 RUN npm run build
