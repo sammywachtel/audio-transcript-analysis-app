@@ -52,53 +52,69 @@ export const useAudioPlayer = (
   const audioIntervalRef = useRef<number | null>(null);
   const lastAudioUrlRef = useRef<string | undefined>(undefined);
 
+  // Refs for values needed by drift correction (to avoid stale closures)
+  const segmentsRef = useRef(segments);
+  const conversationRef = useRef(conversation);
+  const onDriftCorrectedRef = useRef(onDriftCorrected);
+  const isSyncingRef = useRef(isSyncing);
+
+  // Keep refs updated
+  segmentsRef.current = segments;
+  conversationRef.current = conversation;
+  onDriftCorrectedRef.current = onDriftCorrected;
+  isSyncingRef.current = isSyncing;
+
   /**
-   * Setup audio element and drift correction when URL is available
-   * Only recreates the Audio element when audioUrl actually changes
+   * Setup audio element when URL is available
+   * IMPORTANT: Only depends on audioUrl to prevent unnecessary recreation
    */
   useEffect(() => {
-    console.log('[AudioPlayer] useEffect triggered', {
+    console.log('[AudioPlayer] Audio setup effect', {
       hasAudioUrl: !!audioUrl,
-      audioUrl: audioUrl ? audioUrl.substring(0, 50) + '...' : 'none',
-      segmentCount: segments.length,
-      lastUrl: lastAudioUrlRef.current?.substring(0, 50) || 'none'
+      audioUrl: audioUrl ? audioUrl.substring(0, 80) : 'none',
+      lastUrl: lastAudioUrlRef.current?.substring(0, 80) || 'none',
+      hasExistingAudio: !!audioRef.current
     });
 
     if (!audioUrl) {
-      // No audio URL means mock/demo mode
-      console.log('[AudioPlayer] No audio URL - running in mock/demo mode');
+      console.log('[AudioPlayer] No audio URL - mock/demo mode');
       setDuration(initialDuration);
       return;
     }
 
-    // Skip if audioUrl hasn't changed - prevents destroying audio element on re-renders
-    if (audioUrl === lastAudioUrlRef.current && audioRef.current) {
-      console.log('[AudioPlayer] Skipping - audioUrl unchanged and audio element exists');
+    // Only create new Audio element if URL actually changed
+    if (audioUrl === lastAudioUrlRef.current) {
+      console.log('[AudioPlayer] Same URL, keeping existing audio element');
       return;
     }
 
+    // Clean up old audio element if exists
+    if (audioRef.current) {
+      console.log('[AudioPlayer] Cleaning up old audio element');
+      audioRef.current.pause();
+      audioRef.current.src = '';
+    }
+
     lastAudioUrlRef.current = audioUrl;
-    console.log('[AudioPlayer] Creating Audio element with URL:', audioUrl.substring(0, 80));
+    console.log('[AudioPlayer] Creating NEW Audio element');
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
 
-    // Log audio element errors
+    // Error handler
     audio.addEventListener('error', (e) => {
       const error = audio.error;
-      console.error('[AudioPlayer] Audio element error:', {
+      console.error('[AudioPlayer] Audio error:', {
         code: error?.code,
-        message: error?.message,
-        event: e
+        message: error?.message
       });
     });
 
-    // Log when audio can start playing
     audio.addEventListener('canplay', () => {
-      console.log('[AudioPlayer] Audio can start playing (canplay event)');
+      console.log('[AudioPlayer] canplay - ready to play');
     });
 
     audio.addEventListener('canplaythrough', () => {
-      console.log('[AudioPlayer] Audio can play through without buffering (canplaythrough event)');
+      console.log('[AudioPlayer] canplaythrough - fully buffered');
     });
 
     // Handle metadata loaded
@@ -118,9 +134,14 @@ export const useAudioPlayer = (
       setDuration(audioDurMs);
 
       // --- DRIFT CORRECTION LOGIC ---
-      // Check if transcript timestamps are significantly off from actual audio duration
-      const lastSeg = segments[segments.length - 1];
-      if (lastSeg && !isSyncing) {
+      // Use refs to get current values (avoids stale closures)
+      const currentSegments = segmentsRef.current;
+      const currentConversation = conversationRef.current;
+      const currentOnDriftCorrected = onDriftCorrectedRef.current;
+      const currentIsSyncing = isSyncingRef.current;
+
+      const lastSeg = currentSegments[currentSegments.length - 1];
+      if (lastSeg && !currentIsSyncing) {
         const transcriptDurMs = lastSeg.endMs;
         const diff = Math.abs(audioDurMs - transcriptDurMs);
         const ratio = audioDurMs / transcriptDurMs;
@@ -131,7 +152,7 @@ export const useAudioPlayer = (
           setIsSyncing(true);
 
           // Apply linear scaling to all segments
-          const scaledSegments = segments.map(seg => ({
+          const scaledSegments = currentSegments.map(seg => ({
             ...seg,
             startMs: Math.floor(seg.startMs * ratio),
             endMs: Math.floor(seg.endMs * ratio)
@@ -139,14 +160,14 @@ export const useAudioPlayer = (
 
           // Create fixed conversation
           const fixedConversation = {
-            ...conversation,
+            ...currentConversation,
             segments: scaledSegments,
             durationMs: audioDurMs
           };
 
           // Notify parent to update conversation
-          if (onDriftCorrected) {
-            onDriftCorrected(fixedConversation, conversation);
+          if (currentOnDriftCorrected) {
+            currentOnDriftCorrected(fixedConversation, currentConversation);
           }
 
           // Reset syncing state after a short delay (for UI feedback)
@@ -182,12 +203,15 @@ export const useAudioPlayer = (
     });
 
     // Cleanup
+    // Cleanup only runs when audioUrl changes or component unmounts
     return () => {
+      console.log('[AudioPlayer] Cleanup running');
       audio.pause();
       audio.src = '';
       audioRef.current = null;
+      lastAudioUrlRef.current = undefined;
     };
-  }, [audioUrl, segments, conversation, isSyncing, onDriftCorrected, initialDuration]);
+  }, [audioUrl]); // ONLY depend on audioUrl - other deps cause unnecessary recreation
 
   /**
    * Fallback simulation mode for mock data (no real audio)
