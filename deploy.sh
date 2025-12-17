@@ -104,13 +104,18 @@ build_image() {
     log_info "Building container image..."
     log_info "Image: ${IMAGE_NAME}"
 
-    # Build using Cloud Build (no local Docker required)
+    # Generate a tag based on timestamp
+    TAG=$(date +%Y%m%d-%H%M%S)
+
+    # Build using Cloud Build with cloudbuild.yaml (handles build args properly)
     gcloud builds submit \
-        --tag "${IMAGE_NAME}" \
-        --build-arg "VITE_GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" \
+        --config=cloudbuild.yaml \
+        --substitutions="_IMAGE_NAME=${IMAGE_NAME},_TAG=${TAG},_VITE_GEMINI_API_KEY=${VITE_GEMINI_API_KEY}" \
         --quiet
 
-    log_success "Container image built successfully"
+    # Store the tag for deployment
+    DEPLOY_TAG="${TAG}"
+    log_success "Container image built successfully: ${IMAGE_NAME}:${TAG}"
 }
 
 # -----------------------------------------------------------------------------
@@ -122,7 +127,7 @@ deploy_to_cloud_run() {
     log_info "Region: ${REGION}"
 
     gcloud run deploy "${SERVICE_NAME}" \
-        --image "${IMAGE_NAME}" \
+        --image "${IMAGE_NAME}:latest" \
         --platform managed \
         --region "${REGION}" \
         --allow-unauthenticated \

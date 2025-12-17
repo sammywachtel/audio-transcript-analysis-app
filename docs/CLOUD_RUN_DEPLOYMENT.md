@@ -109,11 +109,12 @@ projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/pr
    | **Name** | `github-actions-deployer` |
    | **ID** | `github-actions-deployer` |
 3. Click **Create and Continue**
-4. Grant these roles:
-   - `Cloud Run Admin`
-   - `Artifact Registry Writer`
-   - `Service Account User`
-   - `Cloud Build Editor`
+4. Grant these roles (click "Add Another Role" between each):
+   - `Cloud Run Admin` - Deploy and manage Cloud Run services
+   - `Cloud Build Editor` - Submit and manage Cloud Build jobs
+   - `Artifact Registry Writer` - Push container images
+   - `Service Account User` - Act as service accounts (required for Cloud Run)
+   - `Storage Admin` - Store build artifacts in Cloud Storage
 5. Click **Done**
 
 **Note your Service Account Email** (format):
@@ -121,9 +122,30 @@ projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/pr
 github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com
 ```
 
+> **Important**: Double-check the service account ID matches exactly what you entered. A typo here will cause authentication failures later.
+
 ## Step 7: Grant Workload Identity Access to Service Account
 
-This connects the Workload Identity Pool to the service account.
+This connects the Workload Identity Pool to the service account, allowing GitHub Actions to impersonate it.
+
+### Option A: Using gcloud CLI (Recommended)
+
+This method is more reliable than the console:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com \
+  --project=your-gcp-project-id \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/attribute.repository/your-github-username/your-repo-name"
+```
+
+Replace:
+- `your-gcp-project-id` with your GCP project ID
+- `PROJECT_NUMBER` with your GCP project number (found in Project Settings)
+- `your-github-username/your-repo-name` with your full GitHub repository path
+
+### Option B: Using Console
 
 1. Go to [Workload Identity Pools](https://console.cloud.google.com/iam-admin/workload-identity-pools)
 2. Click on `github-actions` pool
@@ -140,6 +162,18 @@ This connects the Workload Identity Pool to the service account.
 
 6. Click **"Save"**
 7. Dismiss the "Configure your application" popup (not needed for GitHub Actions)
+
+### Verify the Binding
+
+Confirm the binding was created correctly:
+
+```bash
+gcloud iam service-accounts get-iam-policy \
+  github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com \
+  --project=your-gcp-project-id
+```
+
+You should see a binding with `roles/iam.workloadIdentityUser` for the Workload Identity Pool.
 
 ## Step 8: Configure GitHub Secrets
 
@@ -216,31 +250,79 @@ For local deployment using `deploy.sh`:
 
 ## Troubleshooting
 
-### "Permission denied" errors in GitHub Actions
+### "Gaia id not found for email" (404 Not Found)
 
-1. Verify the Workload Identity Provider resource name is correct in GitHub Secrets
-2. Check the attribute condition matches your repository exactly (case-sensitive)
-3. Ensure the service account has all required roles
-4. Verify the service account was granted access to the Workload Identity Pool
+This means the service account email in your GitHub secrets doesn't exist:
+
+1. Verify the service account exists:
+   ```bash
+   gcloud iam service-accounts list --project=your-gcp-project-id --filter="displayName:github"
+   ```
+2. Check for typos in the service account ID (e.g., `deployer` vs `developer`)
+3. Update the `GCP_SERVICE_ACCOUNT` GitHub secret with the correct email
+
+### "Permission 'iam.serviceAccounts.getAccessToken' denied" (403 Forbidden)
+
+The service account exists but Workload Identity can't impersonate it:
+
+1. The Workload Identity binding is missing or malformed
+2. Run the gcloud command from Step 7 to add the binding:
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com \
+     --project=your-gcp-project-id \
+     --role="roles/iam.workloadIdentityUser" \
+     --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/attribute.repository/your-github-username/your-repo-name"
+   ```
+3. Verify the binding exists:
+   ```bash
+   gcloud iam service-accounts get-iam-policy \
+     github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com
+   ```
 
 ### "Unable to authenticate" errors
 
 1. Check the issuer URL is exactly `https://token.actions.githubusercontent.com`
-2. Verify attribute mappings are correct
+2. Verify attribute mappings are correct in the Workload Identity provider
 3. Ensure `id-token: write` permission is set in the workflow
+4. Check the attribute condition in the provider matches your repo exactly (case-sensitive)
+
+### Cloud Build fails
+
+1. Check Cloud Build API is enabled:
+   ```bash
+   gcloud services enable cloudbuild.googleapis.com --project=your-gcp-project-id
+   ```
+2. Verify the service account has these roles:
+   - `Cloud Build Editor`
+   - `Storage Admin`
+3. Grant missing roles:
+   ```bash
+   gcloud projects add-iam-policy-binding your-gcp-project-id \
+     --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+     --role="roles/cloudbuild.builds.editor"
+
+   gcloud projects add-iam-policy-binding your-gcp-project-id \
+     --member="serviceAccount:github-actions-deployer@your-gcp-project-id.iam.gserviceaccount.com" \
+     --role="roles/storage.admin"
+   ```
 
 ### Cloud Run deployment fails
 
-1. Check Cloud Build API is enabled
-2. Verify the service account has `Cloud Build Editor` role
-3. Check Cloud Run API is enabled
-4. Review Cloud Build logs for container build errors
+1. Check Cloud Run API is enabled
+2. Verify the service account has `Cloud Run Admin` role
+3. Review Cloud Build logs for container build errors
+4. Check the Dockerfile builds successfully locally:
+   ```bash
+   docker build -t test-build .
+   ```
 
 ### Health check fails
 
 1. Verify nginx is configured correctly
 2. Check the `/health` endpoint returns 200
 3. Review Cloud Run logs for startup errors
+4. The container might be crashing - check Cloud Run logs in GCP Console
 
 ## Security Notes
 

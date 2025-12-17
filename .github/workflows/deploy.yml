@@ -65,15 +65,13 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Build container image using Cloud Build
+      # Uses cloudbuild.yaml to handle build args properly
       # -----------------------------------------------------------------------
       - name: Build container image
-        env:
-          IMAGE_NAME: gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }}
         run: |
           gcloud builds submit \
-            --tag "${IMAGE_NAME}:${{ github.sha }}" \
-            --tag "${IMAGE_NAME}:latest" \
-            --build-arg "VITE_GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
+            --config=cloudbuild.yaml \
+            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }},_TAG=${{ github.sha }},_VITE_GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" \
             --quiet
 
       # -----------------------------------------------------------------------
