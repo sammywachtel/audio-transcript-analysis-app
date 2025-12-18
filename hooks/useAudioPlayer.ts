@@ -367,11 +367,29 @@ export const useAudioPlayer = (
   /**
    * Find the currently active segment based on playback time + manual offset
    * The offset shifts which segment is highlighted relative to audio position
+   *
+   * If no segment contains the exact time (gap between segments), we keep
+   * the previous segment highlighted until the next one starts.
    */
   const adjustedTime = currentTime + syncOffset;
-  const activeSegmentIndex = segments.findIndex(
+  let activeSegmentIndex = segments.findIndex(
     seg => adjustedTime >= seg.startMs && adjustedTime < seg.endMs
   );
+
+  // If no exact match, find the most recent segment (handles gaps between segments)
+  if (activeSegmentIndex === -1 && adjustedTime > 0) {
+    // Find the last segment that ended before current time
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (segments[i].endMs <= adjustedTime) {
+        // Check if we're before the next segment starts (if there is one)
+        const nextSeg = segments[i + 1];
+        if (!nextSeg || adjustedTime < nextSeg.startMs) {
+          activeSegmentIndex = i;
+          break;
+        }
+      }
+    }
+  }
 
   return {
     isPlaying,
