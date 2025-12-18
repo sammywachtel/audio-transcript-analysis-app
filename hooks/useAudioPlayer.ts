@@ -184,9 +184,14 @@ export const useAudioPlayer = (
         setDriftRatio(ratio);
         setDriftMs(diff);
 
-        // Phase 1: More aggressive threshold - apply drift compensation when >1 second difference
-        // Removed the 5% requirement to catch linear drift (e.g., 8-10 seconds in 2-minute files)
-        if (diff > 1000) {
+        // IMPORTANT: Skip drift correction if WhisperX alignment was already applied
+        // The aligned timestamps are accurate and shouldn't be re-scaled
+        if (currentConversation.alignmentStatus === 'aligned') {
+          console.log(`[Drift Analysis] ⚡ Skipping - already aligned via WhisperX`);
+          setDriftCorrectionApplied(false);
+        } else if (diff > 1000) {
+          // Phase 1: More aggressive threshold - apply drift compensation when >1 second difference
+          // Removed the 5% requirement to catch linear drift (e.g., 8-10 seconds in 2-minute files)
           console.log(`[Auto-Sync] 🔧 Applying drift correction...`);
           setIsSyncing(true);
           setDriftCorrectionApplied(true);

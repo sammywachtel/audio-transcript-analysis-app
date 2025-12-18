@@ -81,7 +81,7 @@ export const TranscriptSegment: React.FC<TranscriptSegmentProps> = ({
     <div
       className={cn(
         "group relative flex gap-4 p-4 rounded-lg transition-colors duration-200 border border-transparent",
-        isActive ? "bg-blue-50/50 border-blue-100" : "hover:bg-slate-50"
+        isActive ? "bg-blue-100 border-blue-300 shadow-sm" : "hover:bg-slate-50"
       )}
     >
       {/* Time & Speaker Column */}

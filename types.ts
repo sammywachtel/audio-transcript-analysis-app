@@ -58,6 +58,8 @@ export interface Conversation {
   termOccurrences: TermOccurrence[]; // Flat list for easy lookup
   topics: Topic[];
   people: Person[];
+  // WhisperX alignment status - prevents drift correction from re-scaling aligned timestamps
+  alignmentStatus?: 'none' | 'aligned' | 'drift_corrected';
 }
 
 export interface PlaybackState {

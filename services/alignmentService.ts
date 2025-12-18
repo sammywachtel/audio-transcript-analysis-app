@@ -133,7 +133,7 @@ export class AlignmentService {
       ...conversation,
       segments: alignedSegments,
       durationMs: alignedDurationMs,
-      // Mark as aligned (could add alignmentStatus to types)
+      alignmentStatus: 'aligned' as const,  // Prevents drift correction from re-scaling
     };
   }
 
