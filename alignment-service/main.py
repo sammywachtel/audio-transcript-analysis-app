@@ -30,15 +30,14 @@ app = FastAPI(
 )
 
 # CORS - allow frontend to call this service
-# In production, restrict this to your actual frontend domain
+# Using regex for Cloud Run domains (glob patterns don't work in allow_origins)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
-        "https://*.run.app",  # Cloud Run domains
-        os.environ.get("FRONTEND_URL", ""),
     ],
+    allow_origin_regex=r"https://.*\.run\.app",  # Match all Cloud Run domains
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
