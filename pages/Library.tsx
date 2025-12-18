@@ -119,6 +119,11 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
               )}
             </div>
         </div>
+
+        {/* Build Info Footer */}
+        <div className="mt-6 text-center text-xs text-slate-400">
+          Built {new Date(__BUILD_TIME__).toLocaleString()}
+        </div>
       </div>
 
       {isModalOpen && (
