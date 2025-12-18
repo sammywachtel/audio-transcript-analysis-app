@@ -16,7 +16,6 @@ import base64
 import logging
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
@@ -791,27 +790,25 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
     # Decode base64 to get audio bytes
     audio_bytes = base64.b64decode(audio_base64)
 
-    # Write to temp file (Replicate needs a file or URL)
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        f.write(audio_bytes)
-        temp_path = f.name
+    logger.info(f"Calling WhisperX with {len(audio_bytes)} bytes of audio")
+
+    # Use data URI - more reliable than file handles in Docker containers
+    # Replicate accepts data URIs in the format: data:audio/mpeg;base64,<data>
+    audio_data_uri = f"data:audio/mpeg;base64,{audio_base64}"
 
     try:
         # Call WhisperX via Replicate
         client = replicate.Client(api_token=api_token)
 
-        logger.info(f"Calling WhisperX with {len(audio_bytes)} bytes of audio")
-
-        with open(temp_path, "rb") as f:
-            output = client.run(
-                WHISPERX_MODEL,
-                input={
-                    "audio_file": f,
-                    "align_output": True,
-                    "batch_size": 16,
-                    "language": "en",
-                },
-            )
+        output = client.run(
+            WHISPERX_MODEL,
+            input={
+                "audio_file": audio_data_uri,
+                "align_output": True,
+                "batch_size": 16,
+                "language": "en",
+            },
+        )
 
         # Parse the output to extract words with timestamps
         words = []
@@ -852,8 +849,9 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
 
         return words
 
-    finally:
-        os.unlink(temp_path)
+    except Exception as e:
+        logger.error(f"WhisperX API call failed: {e}")
+        raise AlignmentError(f"WhisperX API call failed: {e}")
 
 
 # =============================================================================
