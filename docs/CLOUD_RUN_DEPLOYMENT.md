@@ -313,7 +313,7 @@ For local deployment using `deploy.sh`:
 
 1. Install [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
 2. Authenticate: `gcloud auth login`
-3. Copy `.env.example` to `.env.local` and fill in your values
+3. Copy `.env.example` to `.env` and fill in your values
 4. Run: `./deploy.sh`
 
 ## Architecture Diagram

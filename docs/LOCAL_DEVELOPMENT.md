@@ -26,10 +26,10 @@ cd audio-transcript-analysis-app
 npm install
 
 # Setup environment variables
-cp .env.example .env.local
+cp .env.example .env
 ```
 
-Edit `.env.local`:
+Edit `.env`:
 ```
 GEMINI_API_KEY=your_gemini_key_here
 REPLICATE_API_TOKEN=your_replicate_token_here
@@ -142,14 +142,14 @@ To test alignment, use the "Improve Timestamps" button in the UI after uploading
 ### "Improve Timestamps" button not showing
 
 1. Check alignment service is running: `curl http://localhost:8080/health`
-2. Check `ALIGNMENT_SERVICE_URL` in `.env.local` (leave empty for localhost:8080)
+2. Check `ALIGNMENT_SERVICE_URL` in `.env` (leave empty for localhost:8080)
 3. Check browser console for CORS errors
 
 ### Alignment service fails with 401
 
 Your `REPLICATE_API_TOKEN` is missing or invalid:
 1. Get token from https://replicate.com/account/api-tokens
-2. Add to `.env.local`: `REPLICATE_API_TOKEN=your_token`
+2. Add to `.env`: `REPLICATE_API_TOKEN=your_token`
 3. Restart the alignment service
 
 ### Docker build fails
@@ -242,6 +242,6 @@ docker compose build alignment-service
 |------|-------|
 | Frontend source | `./components/`, `./pages/`, `./hooks/`, `./services/` |
 | Alignment service | `./alignment-service/` |
-| Environment config | `.env.local` |
+| Environment config | `.env` |
 | Docker config | `docker-compose.yml`, `Dockerfile.frontend` |
 | Documentation | `./docs/` |

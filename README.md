@@ -50,8 +50,8 @@ Transform audio recordings into interactive, navigable transcripts with AI-power
 npm install
 
 # Copy environment template and add your API keys
-cp .env.example .env.local
-# Edit .env.local and add:
+cp .env.example .env
+# Edit .env and add:
 #   GEMINI_API_KEY=your_key
 #   REPLICATE_API_TOKEN=your_token
 
@@ -65,8 +65,8 @@ Frontend runs at http://localhost:3000
 
 ```bash
 # Copy environment template and add your API keys
-cp .env.example .env.local
-# Edit .env.local with your API keys
+cp .env.example .env
+# Edit .env with your API keys
 
 # Start both frontend and alignment service
 docker compose up

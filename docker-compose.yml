@@ -8,7 +8,7 @@
 #   docker compose down            # Stop all services
 #
 # Prerequisites:
-#   - Copy .env.example to .env.local and fill in your API keys
+#   - Copy .env.example to .env and fill in your API keys
 #   - REPLICATE_API_TOKEN is required for timestamp alignment
 
 services:
