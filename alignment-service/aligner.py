@@ -35,22 +35,22 @@ WHISPERX_MODEL = "victor-upmeet/whisperx:84d2ad2d6194fe98a17d2b60bef1c7f910c46b2
 # =============================================================================
 
 # Anchor detection thresholds
-ANCHOR_MIN_CONFIDENCE = 0.85  # Minimum similarity for anchor points
-ANCHOR_MIN_WORDS = 3  # Minimum words for an anchor
-ANCHOR_MAX_WORDS = 15  # Maximum words for an anchor
+ANCHOR_MIN_CONFIDENCE = 0.75  # Minimum similarity for anchor points (lowered from 0.85)
+ANCHOR_MIN_WORDS = 2  # Minimum words for an anchor (lowered from 3)
+ANCHOR_MAX_WORDS = 20  # Maximum words for an anchor (raised from 15)
 
-# Search window configuration
-TIME_WINDOW_EXPANSION = 0.30  # 30% expansion from time hints
-MIN_SEARCH_BUFFER = 30  # Minimum words to search around hint
+# Search window configuration - FIXED: use absolute values, not percentages
+TIME_WINDOW_SECONDS = 30  # Search ±30 seconds around time hint
+MIN_SEARCH_BUFFER = 50  # Minimum words to search around hint (raised from 30)
 
 # Matching thresholds
-MIN_SEGMENT_CONFIDENCE = 0.45  # Per-segment minimum to accept
-MIN_REGION_CONFIDENCE = 0.55  # Average confidence for a region
+MIN_SEGMENT_CONFIDENCE = 0.40  # Per-segment minimum to accept (lowered from 0.45)
+MIN_REGION_CONFIDENCE = 0.50  # Average confidence for a region (lowered from 0.55)
 
 # Validation
-MAX_OVERLAP_MS = 1000  # Max overlap between consecutive segments
-MIN_MS_PER_WORD = 30  # Minimum milliseconds per word (very fast speech)
-MAX_MS_PER_WORD = 600  # Maximum milliseconds per word (very slow/pauses)
+MAX_OVERLAP_MS = 2000  # Max overlap between consecutive segments (raised from 1000)
+MIN_MS_PER_WORD = 20  # Minimum milliseconds per word (lowered from 30)
+MAX_MS_PER_WORD = 800  # Maximum milliseconds per word (raised from 600)
 
 
 # =============================================================================
@@ -241,13 +241,15 @@ def find_anchors(
         if word_count < ANCHOR_MIN_WORDS or word_count > ANCHOR_MAX_WORDS:
             continue
 
-        # Compute time-bounded search window
+        # Compute time-bounded search window using FIXED window size
         time_hint_start = segment.start_ms
         time_hint_end = segment.end_ms
 
-        # Find word indices that fall within time window (with expansion)
-        window_start_ms = max(0, time_hint_start - int(time_hint_start * 0.2))
-        window_end_ms = min(audio_duration_ms, time_hint_end + int(time_hint_end * 0.2))
+        # FIXED: Use absolute time window, not percentage of time
+        # This was causing wrong windows (at 10min mark, ±20% = ±2min which is insane)
+        window_expansion_ms = TIME_WINDOW_SECONDS * 1000
+        window_start_ms = max(0, time_hint_start - window_expansion_ms)
+        window_end_ms = min(audio_duration_ms, time_hint_end + window_expansion_ms)
 
         # Convert time window to word indices
         word_start_idx = find_word_at_time(words, window_start_ms / 1000.0)
@@ -290,6 +292,22 @@ def find_anchors(
         f"Found {len(anchors)} anchors from {len(segments)} segments "
         f"(anchor rate: {len(anchors)/len(segments)*100:.1f}%)"
     )
+
+    # Log anchor distribution
+    if anchors:
+        anchor_indices = [a.segment_idx for a in anchors]
+        anchor_times = [a.start_ms / 1000 for a in anchors]
+        ellipsis = "..." if len(anchors) > 10 else ""
+        logger.info(f"Anchor segment indices: {anchor_indices[:10]}{ellipsis}")
+        times_fmt = [f"{t:.1f}" for t in anchor_times[:10]]
+        logger.info(f"Anchor times (s): {times_fmt}{ellipsis}")
+
+        # Warn if anchors are all clustered at the beginning
+        if anchors and anchor_indices[-1] < len(segments) * 0.3:
+            logger.warning(
+                f"Anchors clustered in first 30% of transcript! "
+                f"Last anchor at segment {anchor_indices[-1]}/{len(segments)}"
+            )
 
     return anchors
 
@@ -383,6 +401,15 @@ def segment_into_regions(
 
     logger.info(f"Created {len(regions)} regions from {len(anchors)} anchors")
 
+    # Log region details for debugging
+    for i, region in enumerate(regions):
+        logger.info(
+            f"Region {i}: segments {region.start_segment_idx}-{region.end_segment_idx} "
+            f"({len(region.segments)} segs), "
+            f"words {region.word_start_idx}-{region.word_end_idx}, "
+            f"time {region.time_start_ms/1000:.1f}s-{region.time_end_ms/1000:.1f}s"
+        )
+
     return regions
 
 
@@ -474,6 +501,9 @@ def align_region(
     region_duration = region.time_end_ms - region.time_start_ms
     segment_count = len(region.segments)
 
+    matched_count = 0
+    interpolated_count = 0
+
     for i, segment in enumerate(region.segments):
         expected_words = len(segment.text.split())
 
@@ -505,6 +535,7 @@ def align_region(
                 )
             )
             current_word_idx = match.end_idx
+            matched_count += 1
         else:
             # Fallback: interpolate within region
             progress = i / max(segment_count, 1)
@@ -522,6 +553,16 @@ def align_region(
                     method="interpolated",
                 )
             )
+            interpolated_count += 1
+
+    # Log region alignment results
+    if segment_count > 0:
+        logger.info(
+            f"Region {region.start_segment_idx}-{region.end_segment_idx}: "
+            f"matched={matched_count}/{segment_count} "
+            f"({matched_count/segment_count*100:.0f}%), "
+            f"interpolated={interpolated_count}"
+        )
 
     return aligned
 
@@ -568,19 +609,27 @@ def validate_and_fix_alignment(
         ms_per_word = duration / word_count
 
         if ms_per_word < MIN_MS_PER_WORD or ms_per_word > MAX_MS_PER_WORD:
-            # Duration is unreasonable - use original timestamps
-            orig = original_segments[i]
+            # Duration is unreasonable - estimate based on word count
+            # DO NOT use original timestamps - they're the broken ones we're fixing!
+            # Use average speech rate of ~150ms per word
+            estimated_duration = word_count * 150
             if i > 0:
-                # Ensure we don't overlap with previous
-                new_start = max(orig.start_ms, fixed[-1].end_ms)
+                new_start = fixed[-1].end_ms + 50  # Small gap after previous
             else:
-                new_start = orig.start_ms
+                new_start = seg.start_ms  # Keep start if first segment
+
+            logger.warning(
+                f"Duration fallback for segment {i}: "
+                f"ms_per_word={ms_per_word:.0f} out of range "
+                f"[{MIN_MS_PER_WORD}-{MAX_MS_PER_WORD}], "
+                f"estimated {estimated_duration}ms"
+            )
 
             seg = AlignedSegment(
                 speaker_id=seg.speaker_id,
                 text=seg.text,
                 start_ms=new_start,
-                end_ms=max(new_start + 100, orig.end_ms),
+                end_ms=new_start + estimated_duration,
                 confidence=0.3,  # Low confidence for fallback
                 method="duration_fallback",
             )
@@ -744,7 +793,22 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
         if not words:
             raise AlignmentError("WhisperX returned no words - check audio format")
 
-        logger.info(f"WhisperX returned {len(words)} words")
+        # Diagnostic logging - understand what WhisperX returned
+        first_word = words[0] if words else None
+        last_word = words[-1] if words else None
+        logger.info(
+            f"WhisperX returned {len(words)} words spanning "
+            f"{first_word.start:.1f}s to {last_word.end:.1f}s "
+            f"({last_word.end - first_word.start:.1f}s total)"
+        )
+
+        # Log sample words for debugging
+        if len(words) > 10:
+            sample_words = [w.word for w in words[:5]]
+            sample_end = [w.word for w in words[-5:]]
+            logger.info(f"First 5 words: {sample_words}")
+            logger.info(f"Last 5 words: {sample_end}")
+
         return words
 
     finally:
