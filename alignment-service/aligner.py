@@ -149,11 +149,11 @@ async def get_whisperx_timestamps(audio_base64: str) -> List[Word]:
         # Using victor-upmeet/whisperx for word-level timestamps
         client = replicate.Client(api_token=api_token)
 
-        with open(temp_path, "rb") as audio_file:
+        with open(temp_path, "rb") as f:
             output = client.run(
                 WHISPERX_MODEL,
                 input={
-                    "audio": audio_file,
+                    "audio_file": f,  # Replicate expects 'audio_file' not 'audio'
                     "align_output": True,  # Get word-level alignment
                     "batch_size": 16,
                     "language": "en",  # Can make this configurable
