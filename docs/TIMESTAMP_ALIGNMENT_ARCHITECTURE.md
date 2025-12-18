@@ -181,8 +181,8 @@ The easiest way to run the full stack locally:
 
 ```bash
 # 1. Setup environment
-cp .env.example .env.local
-# Edit .env.local with your API keys
+cp .env.example .env
+# Edit .env with your API keys
 
 # 2. Start all services
 docker compose up

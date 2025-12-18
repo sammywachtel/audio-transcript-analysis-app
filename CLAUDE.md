@@ -51,7 +51,7 @@ npm run preview    # Preview production build
 
 ## Environment Variables
 
-Set `GEMINI_API_KEY` in `.env.local` for Gemini API access:
+Set `GEMINI_API_KEY` in `.env` for Gemini API access:
 ```
 GEMINI_API_KEY=your_key_here
 ```

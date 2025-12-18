@@ -33,14 +33,14 @@ log_error() {
 }
 
 # -----------------------------------------------------------------------------
-# Configuration (set these in .env.local or export as environment variables)
+# Configuration (set these in .env or export as environment variables)
 # -----------------------------------------------------------------------------
 
-# Try to load from .env.local first
-if [ -f ".env.local" ]; then
-    log_info "Loading environment from .env.local..."
+# Try to load from .env first
+if [ -f ".env" ]; then
+    log_info "Loading environment from .env..."
     set -a  # automatically export all variables
-    source .env.local
+    source .env
     set +a
 fi
 
@@ -50,7 +50,7 @@ SERVICE_NAME="${GCP_SERVICE_NAME:-audio-transcript-app}"
 
 # Validate required configuration
 if [ -z "$PROJECT_ID" ]; then
-    log_error "GCP_PROJECT_ID is not set. Set it in .env.local or export it."
+    log_error "GCP_PROJECT_ID is not set. Set it in .env or export it."
     exit 1
 fi
 
@@ -82,7 +82,7 @@ preflight_checks() {
         gcloud config set project "$PROJECT_ID"
     fi
 
-    # Check for Gemini API key (should be loaded from .env.local or exported)
+    # Check for Gemini API key (should be loaded from .env or exported)
     # Support both GEMINI_API_KEY and VITE_GEMINI_API_KEY
     if [ -z "$VITE_GEMINI_API_KEY" ] && [ -n "$GEMINI_API_KEY" ]; then
         VITE_GEMINI_API_KEY="${GEMINI_API_KEY}"
@@ -90,7 +90,7 @@ preflight_checks() {
     fi
 
     if [ -z "$VITE_GEMINI_API_KEY" ]; then
-        log_error "GEMINI_API_KEY or VITE_GEMINI_API_KEY is not set. Set it in .env.local or export it."
+        log_error "GEMINI_API_KEY or VITE_GEMINI_API_KEY is not set. Set it in .env or export it."
         exit 1
     fi
 
