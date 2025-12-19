@@ -33,9 +33,10 @@ Enable each API by clicking the links below:
 | **Artifact Registry** | Store container images | [Enable](https://console.cloud.google.com/apis/library/artifactregistry.googleapis.com) |
 | **Secret Manager** | Store API keys securely | [Enable](https://console.cloud.google.com/apis/library/secretmanager.googleapis.com) |
 | **Firestore** | Database | [Enable](https://console.cloud.google.com/apis/library/firestore.googleapis.com) |
-| **Cloud Run** | Host frontend | [Enable](https://console.cloud.google.com/apis/library/run.googleapis.com) |
+| **Cloud Run** | Cloud Functions v2 runtime + frontend hosting | [Enable](https://console.cloud.google.com/apis/library/run.googleapis.com) |
 | **IAM Credentials** | Workload Identity | [Enable](https://console.cloud.google.com/apis/library/iamcredentials.googleapis.com) |
 | **Eventarc** | Cloud Functions v2 event triggers | [Enable](https://console.cloud.google.com/apis/library/eventarc.googleapis.com) |
+| **Cloud Billing** | Verify project billing status | [Enable](https://console.cloud.google.com/apis/library/cloudbilling.googleapis.com) |
 | **Firebase Extensions** | Firebase deployment features | [Enable](https://console.cloud.google.com/apis/library/firebaseextensions.googleapis.com) |
 
 ### Via CLI
@@ -52,6 +53,7 @@ gcloud services enable \
   run.googleapis.com \
   iamcredentials.googleapis.com \
   eventarc.googleapis.com \
+  cloudbilling.googleapis.com \
   firebaseextensions.googleapis.com \
   --project=$PROJECT_ID
 ```
@@ -177,8 +179,7 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
 | **Firebase Admin** | Access Firebase Extensions API (required for deployments) |
-| **Secret Manager Viewer** | Check if secrets exist during deployment |
-| **Secret Manager Secret Accessor** | Read secret values during function deployment |
+| **Secret Manager Admin** | Manage secrets and grant runtime SA access during deployment |
 
 Via CLI:
 
@@ -212,11 +213,7 @@ gcloud projects add-iam-policy-binding $PROJECT \
 
 gcloud projects add-iam-policy-binding $PROJECT \
   --member="serviceAccount:$SA_EMAIL" \
-  --role="roles/secretmanager.viewer"
-
-gcloud projects add-iam-policy-binding $PROJECT \
-  --member="serviceAccount:$SA_EMAIL" \
-  --role="roles/secretmanager.secretAccessor"
+  --role="roles/secretmanager.admin"
 ```
 
 ### 3. Grant Secret Access to Cloud Functions Runtime
@@ -235,7 +232,45 @@ gcloud projects add-iam-policy-binding your-project-id \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-### 4. Add GitHub Secrets
+### 4. Configure Service Agent IAM Bindings
+
+> **Important**: Cloud Functions v2 with Storage triggers requires Google-managed service agents to have specific roles for the event pipeline (Storage → Pub/Sub → Eventarc → Cloud Run).
+
+Find your project number in [Project Settings](https://console.cloud.google.com/iam-admin/settings) or:
+```bash
+PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+```
+
+Grant the required roles:
+```bash
+PROJECT_NUMBER="your-project-number"
+PROJECT_ID="your-project-id"
+
+# Storage service agent → can publish to Pub/Sub
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+
+# Pub/Sub service agent → can create auth tokens
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# Compute service agent → can invoke Cloud Run and receive events
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/eventarc.eventReceiver"
+
+# Eventarc service agent → can read storage bucket for triggers
+gsutil iam ch serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com:objectViewer \
+  gs://${PROJECT_ID}.firebasestorage.app
+```
+
+### 5. Add GitHub Secrets
 
 In your repository: **Settings** → **Secrets and variables** → **Actions**
 
@@ -272,13 +307,11 @@ npx firebase deploy --only firestore:rules
 
 **Solution**: Enable both APIs via console or CLI (Step 2).
 
-### "secretmanager.secrets.get" permission denied for GEMINI_API_KEY
+### "secretmanager.secrets.get" or "setIamPolicy" permission denied
 
 **Cause**: One of these issues:
 1. The secret doesn't exist
-2. The deployment service account is missing **Secret Manager Viewer** role (needed to check if secrets exist)
-3. The deployment service account is missing **Secret Manager Secret Accessor** role (needed to read values)
-4. The **runtime** service account (`your-project-id@appspot.gserviceaccount.com`) is missing Secret Accessor role
+2. The deployment service account is missing **Secret Manager Admin** role
 
 **Solution**:
 
@@ -289,27 +322,14 @@ npx firebase deploy --only firestore:rules
    npx firebase functions:secrets:set GEMINI_API_KEY
    ```
 
-2. **Grant roles to the deployment service account**:
-   ```bash
-   # Viewer role (check if secrets exist)
-   gcloud projects add-iam-policy-binding your-project-id \
-     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
-     --role="roles/secretmanager.viewer"
-
-   # Accessor role (read secret values)
-   gcloud projects add-iam-policy-binding your-project-id \
-     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
-     --role="roles/secretmanager.secretAccessor"
-   ```
-
-3. **Grant accessor role to the runtime service account**:
+2. **Grant Secret Manager Admin to the deployment service account**:
    ```bash
    gcloud projects add-iam-policy-binding your-project-id \
-     --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
-     --role="roles/secretmanager.secretAccessor"
+     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
+     --role="roles/secretmanager.admin"
    ```
 
-4. **Verify roles are assigned**:
+3. **Verify the role is assigned**:
    ```bash
    gcloud projects get-iam-policy your-project-id \
      --flatten="bindings[].members" \
@@ -317,7 +337,7 @@ npx firebase deploy --only firestore:rules
      --format="table(bindings.role, bindings.members)"
    ```
 
-> **Note**: Firebase CLI needs **Viewer** to check secret metadata and **Accessor** to read values. The runtime SA only needs Accessor since it just reads values at function execution time.
+> **Note**: Firebase CLI needs Admin (not just Viewer/Accessor) because it automatically grants the runtime service account access to secrets during deployment via `setIamPolicy`.
 
 ## Verification
 
