@@ -663,6 +663,42 @@ def validate_and_fix_alignment(
 
         fixed.append(seg)
 
+    # === FIX: Clip segment end times that overlap with next segment ===
+    # This prevents the "Speaker 2 interjection extends over Speaker 1" bug
+    # where a segment's end time is way beyond where it should be
+    for i in range(len(fixed) - 1):
+        current_seg = fixed[i]
+        next_seg = fixed[i + 1]
+
+        # If this segment's end overlaps significantly with next segment's start
+        # (beyond the allowed overlap threshold), clip it
+        if current_seg.end_ms > next_seg.start_ms + MAX_OVERLAP_MS:
+            # Calculate how much to clip
+            overlap = current_seg.end_ms - next_seg.start_ms
+            logger.warning(
+                f"Segment {i} end ({current_seg.end_ms}ms) overlaps {overlap}ms "
+                f"into segment {i+1} start ({next_seg.start_ms}ms). Clipping."
+            )
+
+            # Clip to just before next segment starts (with small buffer)
+            clipped_end = max(
+                current_seg.start_ms + 100,  # Minimum 100ms duration
+                next_seg.start_ms - 100,  # Small gap before next
+            )
+
+            fixed[i] = AlignedSegment(
+                speaker_id=current_seg.speaker_id,
+                text=current_seg.text,
+                start_ms=current_seg.start_ms,
+                end_ms=clipped_end,
+                confidence=current_seg.confidence * 0.9,  # Penalize for clipping
+                method=(
+                    current_seg.method + "_clipped"
+                    if "_clipped" not in current_seg.method
+                    else current_seg.method
+                ),
+            )
+
     # === CRITICAL FIX: Cap timestamps at audio duration ===
     # This prevents the cloud bug where alignment produces timestamps
     # longer than the actual audio (e.g., 690s timestamps for 596s audio)

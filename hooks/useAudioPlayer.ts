@@ -87,6 +87,20 @@ export const useAudioPlayer = (
   isSyncingRef.current = isSyncing;
 
   /**
+   * Reset drift correction when alignment status changes to 'aligned'
+   * This ensures the UI reflects that WhisperX aligned timestamps don't need drift correction
+   */
+  useEffect(() => {
+    if (conversation.alignmentStatus === 'aligned') {
+      console.log('[AudioPlayer] Alignment status changed to aligned - resetting drift correction');
+      setDriftCorrectionApplied(false);
+      setDriftRatio(1.0);
+      setDriftMs(0);
+      setIsSyncing(false);
+    }
+  }, [conversation.alignmentStatus]);
+
+  /**
    * Setup audio element when URL is available
    * IMPORTANT: Only depends on audioUrl to prevent unnecessary recreation
    */
@@ -368,17 +382,31 @@ export const useAudioPlayer = (
    * Find the currently active segment based on playback time + manual offset
    * The offset shifts which segment is highlighted relative to audio position
    *
+   * Handles overlapping segments by preferring the one whose start is closest.
    * If no segment contains the exact time (gap between segments), we keep
    * the previous segment highlighted until the next one starts.
    */
   const adjustedTime = currentTime + syncOffset;
-  let activeSegmentIndex = segments.findIndex(
-    seg => adjustedTime >= seg.startMs && adjustedTime < seg.endMs
-  );
 
-  // If no exact match, find the most recent segment (handles gaps between segments)
-  if (activeSegmentIndex === -1 && adjustedTime > 0) {
-    // Find the last segment that ended before current time
+  // Find all segments that could contain this time (handles overlaps)
+  const matchingIndices: number[] = [];
+  segments.forEach((seg, idx) => {
+    if (adjustedTime >= seg.startMs && adjustedTime < seg.endMs) {
+      matchingIndices.push(idx);
+    }
+  });
+
+  let activeSegmentIndex = -1;
+  if (matchingIndices.length > 0) {
+    // If multiple segments match (due to overlap), prefer the one whose start is closest
+    // This prevents clicking segment N from highlighting segment N-1
+    activeSegmentIndex = matchingIndices.reduce((best, current) => {
+      const bestDist = Math.abs(segments[best].startMs - adjustedTime);
+      const currentDist = Math.abs(segments[current].startMs - adjustedTime);
+      return currentDist < bestDist ? current : best;
+    });
+  } else if (adjustedTime > 0) {
+    // If no exact match, find the most recent segment (handles gaps between segments)
     for (let i = segments.length - 1; i >= 0; i--) {
       if (segments[i].endMs <= adjustedTime) {
         // Check if we're before the next segment starts (if there is one)
