@@ -114,6 +114,8 @@ VITE_FIREBASE_APP_ID=1:123456789012:web:abc123
 
 ## Step 8: Set Gemini API Secret
 
+> **Important**: This step MUST be completed before CI/CD deployments will work. The secret must exist before GitHub Actions can deploy functions that use it.
+
 The Gemini API key is stored securely in Firebase Secrets (not in client code):
 
 ```bash
@@ -128,6 +130,11 @@ npx firebase functions:secrets:set GEMINI_API_KEY
 ```
 
 Get a Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey).
+
+**Verify the secret was created:**
+```bash
+npx firebase functions:secrets:access GEMINI_API_KEY
+```
 
 ## Step 9: Deploy Security Rules
 
@@ -168,7 +175,7 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
 | **Firebase Admin** | Access Firebase Extensions API (required for deployments) |
-| **Secret Manager Secret Accessor** | Read secrets (like GEMINI_API_KEY) during deployment |
+| **Secret Manager Secret Accessor** | Access secrets (GEMINI_API_KEY) during function deployment |
 
 Via CLI:
 
@@ -205,7 +212,23 @@ gcloud projects add-iam-policy-binding $PROJECT \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-### 3. Add GitHub Secrets
+### 3. Grant Secret Access to Cloud Functions Runtime
+
+> **Important**: Cloud Functions run under a *different* service account than the one used for deployment. The runtime service account also needs secret access.
+
+The default runtime service account is the **App Engine default service account**:
+```
+your-project-id@appspot.gserviceaccount.com
+```
+
+Grant secret access to the runtime service account:
+```bash
+gcloud projects add-iam-policy-binding your-project-id \
+  --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+### 4. Add GitHub Secrets
 
 In your repository: **Settings** → **Secrets and variables** → **Actions**
 
@@ -241,6 +264,45 @@ npx firebase deploy --only firestore:rules
 **Cause**: Cloud Functions or Cloud Build API not enabled.
 
 **Solution**: Enable both APIs via console or CLI (Step 2).
+
+### "secretmanager.secrets.get" permission denied for GEMINI_API_KEY
+
+**Cause**: One of three issues:
+1. The secret doesn't exist
+2. The deployment service account (`firebase-adminsdk-*`) is missing Secret Accessor role
+3. The **runtime** service account (`your-project-id@appspot.gserviceaccount.com`) is missing Secret Accessor role
+
+**Solution**:
+
+1. **Ensure the secret exists** (run locally):
+   ```bash
+   npx firebase login
+   npx firebase use your-project-id
+   npx firebase functions:secrets:set GEMINI_API_KEY
+   ```
+
+2. **Grant secret access to BOTH service accounts**:
+   ```bash
+   # Deployment service account
+   gcloud projects add-iam-policy-binding your-project-id \
+     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+
+   # Runtime service account (App Engine default - required!)
+   gcloud projects add-iam-policy-binding your-project-id \
+     --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+
+3. **Verify both have the role**:
+   ```bash
+   gcloud projects get-iam-policy your-project-id \
+     --flatten="bindings[].members" \
+     --filter="bindings.role:secretmanager.secretAccessor" \
+     --format="table(bindings.members)"
+   ```
+
+> **Note**: Firebase validates secret access for the **runtime** service account during deployment. Even if your deployment SA has access, the function's runtime SA also needs it.
 
 ## Verification
 
