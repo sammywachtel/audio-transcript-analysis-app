@@ -264,6 +264,10 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
   --role="roles/eventarc.eventReceiver"
+
+# Eventarc service agent → can read storage bucket for triggers
+gsutil iam ch serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com:objectViewer \
+  gs://${PROJECT_ID}.firebasestorage.app
 ```
 
 ### 5. Add GitHub Secrets
