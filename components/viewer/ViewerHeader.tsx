@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArrowLeft, MoreHorizontal, Download, Share2, RefreshCw, Wand2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Button } from '../Button';
+import { UserMenu } from '../auth/UserMenu';
 
 type AlignmentStatus = 'idle' | 'aligning' | 'aligned' | 'error';
 
@@ -125,6 +126,7 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
         <button className="p-2 hover:bg-slate-100 rounded text-slate-500">
           <MoreHorizontal size={20} />
         </button>
+        <UserMenu />
       </div>
     </header>
   );

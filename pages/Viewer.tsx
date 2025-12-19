@@ -84,7 +84,8 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     handleTermClickInSidebar,
     handlePersonClickInSidebar
   } = useTranscriptSelection({
-    termOccurrences: conversation.termOccurrences
+    termOccurrences: conversation.termOccurrences,
+    personMentions: mentionsMap
   });
 
   // Auto-scroll to active segment during playback

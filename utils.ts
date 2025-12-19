@@ -15,8 +15,10 @@ export const cn = (...classes: (string | undefined | null | false)[]) => {
 export const createMockConversation = (file: File): Conversation => {
   return {
     conversationId: `c_${Date.now()}`,
+    userId: 'local', // Placeholder - will be set by ConversationContext
     title: file.name.replace(/\.[^/.]+$/, ""), // Remove extension
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     durationMs: 12500, // Mock duration
     status: 'complete',
     speakers: {
@@ -310,8 +312,10 @@ export const processAudioWithGemini = async (file: File): Promise<Conversation> 
 
   return {
     conversationId,
+    userId: 'local', // Placeholder - will be set by ConversationContext.addConversation
     title: data.title,
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     durationMs,
     audioUrl,
     status: 'complete',

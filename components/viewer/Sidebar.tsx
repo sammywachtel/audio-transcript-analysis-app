@@ -190,9 +190,15 @@ const PersonCard: React.FC<{
     }
   }
 
+  // When card is clicked, reset to first mention and navigate
+  const handleCardClick = () => {
+    setCurrentMentionIdx(0);
+    onClick?.();
+  }
+
   return (
     <div
-        onClick={onClick}
+        onClick={handleCardClick}
         className={cn(
             "p-3 rounded-lg border transition-all shadow-sm hover:shadow-md cursor-pointer",
             isActive

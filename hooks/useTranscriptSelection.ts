@@ -3,6 +3,7 @@ import { TermOccurrence } from '../types';
 
 interface UseTranscriptSelectionOptions {
   termOccurrences: TermOccurrence[];
+  personMentions?: Record<string, string[]>; // personId -> array of segmentIds
 }
 
 interface UseTranscriptSelectionReturn {
@@ -33,7 +34,7 @@ interface UseTranscriptSelectionReturn {
 export const useTranscriptSelection = (
   options: UseTranscriptSelectionOptions
 ): UseTranscriptSelectionReturn => {
-  const { termOccurrences } = options;
+  const { termOccurrences, personMentions = {} } = options;
 
   const [selectedTermId, setSelectedTermId] = useState<string | undefined>(undefined);
   const [selectedPersonId, setSelectedPersonId] = useState<string | undefined>(undefined);
@@ -83,12 +84,22 @@ export const useTranscriptSelection = (
   }, [selectTerm, termOccurrences]);
 
   /**
-   * Handle person click in sidebar
-   * Note: Person mention navigation is handled via the PersonCard's arrow buttons
+   * Handle person click in sidebar → scroll to first mention in transcript
+   * Additional mentions can be navigated via the PersonCard's arrow buttons
    */
   const handlePersonClickInSidebar = useCallback((personId: string) => {
     selectPerson(personId);
-  }, [selectPerson]);
+
+    // Navigate to first mention
+    const mentions = personMentions[personId];
+    if (mentions && mentions.length > 0) {
+      const firstSegmentId = mentions[0];
+      const segmentEl = document.getElementById(`segment-${firstSegmentId}`);
+      if (segmentEl) {
+        segmentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [selectPerson, personMentions]);
 
   return {
     selectedTermId,

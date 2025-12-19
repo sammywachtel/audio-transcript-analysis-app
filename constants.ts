@@ -5,8 +5,10 @@ const id = (prefix: string) => `${prefix}_${Math.random().toString(36).substr(2,
 
 export const MOCK_CONVERSATION: Conversation = {
   conversationId: 'c_demo_123',
+  userId: 'local', // Placeholder - will be migrated on first sign-in
   title: 'Engineering Sync: OAuth Migration Strategy',
   createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
   durationMs: 45000, // 45 seconds for demo loop
   status: 'complete',
   speakers: {

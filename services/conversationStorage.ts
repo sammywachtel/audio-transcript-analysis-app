@@ -5,11 +5,15 @@ interface ContextualAppDB extends DBSchema {
   conversations: {
     key: string;
     value: Conversation & { audioBlob?: Blob };
+    indexes: {
+      'by-user': string; // Index for filtering conversations by userId
+      'by-updated': string; // Index for sorting by updatedAt
+    };
   };
 }
 
 const DB_NAME = 'contextual-transcript-app';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Incremented for schema migration
 
 /**
  * ConversationStorageService - Handles all IndexedDB operations for conversations
@@ -24,9 +28,28 @@ export class ConversationStorageService {
   private async getDB(): Promise<IDBPDatabase<ContextualAppDB>> {
     if (!this.dbPromise) {
       this.dbPromise = openDB<ContextualAppDB>(DB_NAME, DB_VERSION, {
-        upgrade(db) {
+        upgrade(db, oldVersion, newVersion, transaction) {
+          let store;
+
+          // Initial creation (v0 -> v1)
           if (!db.objectStoreNames.contains('conversations')) {
-            db.createObjectStore('conversations', { keyPath: 'conversationId' });
+            store = db.createObjectStore('conversations', { keyPath: 'conversationId' });
+          }
+
+          // Migration from v1 -> v2: Add indexes for multi-user support
+          if (oldVersion < 2) {
+            // Get the store from the versionchange transaction
+            if (!store) {
+              store = transaction.objectStore('conversations');
+            }
+
+            // Create indexes if they don't exist
+            if (!store.indexNames.contains('by-user')) {
+              store.createIndex('by-user', 'userId', { unique: false });
+            }
+            if (!store.indexNames.contains('by-updated')) {
+              store.createIndex('by-updated', 'updatedAt', { unique: false });
+            }
           }
         },
       });
@@ -160,6 +183,110 @@ export class ConversationStorageService {
   async clearAll(): Promise<void> {
     const db = await this.getDB();
     await db.clear('conversations');
+  }
+
+  /**
+   * Load conversations for a specific user
+   * Filters by userId using the by-user index for performance
+   */
+  async loadAllForUser(userId: string): Promise<Conversation[]> {
+    const db = await this.getDB();
+    const tx = db.transaction('conversations', 'readonly');
+    const index = tx.objectStore('conversations').index('by-user');
+
+    const items = await index.getAll(userId);
+
+    console.log('[Storage] Loading conversations for user:', { userId, count: items.length });
+
+    // Sort by newest first (updatedAt or createdAt)
+    items.sort((a, b) => {
+      const aTime = new Date(a.updatedAt || a.createdAt).getTime();
+      const bTime = new Date(b.updatedAt || b.createdAt).getTime();
+      return bTime - aTime;
+    });
+
+    return items.map(item => {
+      const { audioBlob, ...rest } = item;
+      let audioUrl: string | undefined;
+
+      if (audioBlob) {
+        audioUrl = URL.createObjectURL(audioBlob);
+      }
+
+      return {
+        ...rest,
+        people: item.people || [],
+        audioUrl
+      } as Conversation;
+    });
+  }
+
+  /**
+   * Migrate orphan conversations (without userId) to belong to a user
+   * Called on first sign-in to claim existing local data
+   *
+   * Returns the number of conversations migrated
+   */
+  async migrateOrphanConversations(userId: string): Promise<number> {
+    const db = await this.getDB();
+    const tx = db.transaction('conversations', 'readwrite');
+    const store = tx.objectStore('conversations');
+
+    let migratedCount = 0;
+    let cursor = await store.openCursor();
+
+    console.log('[Storage] Starting orphan conversation migration for user:', userId);
+
+    while (cursor) {
+      const conversation = cursor.value;
+
+      // If conversation has no userId or has a placeholder userId, claim it
+      if (!conversation.userId || conversation.userId === 'anonymous' || conversation.userId === 'local') {
+        const updated = {
+          ...conversation,
+          userId,
+          updatedAt: conversation.updatedAt || new Date().toISOString()
+        };
+
+        await cursor.update(updated);
+        migratedCount++;
+
+        console.log('[Storage] Migrated conversation:', {
+          id: conversation.conversationId,
+          title: conversation.title,
+          oldUserId: conversation.userId,
+          newUserId: userId
+        });
+      }
+
+      cursor = await cursor.continue();
+    }
+
+    await tx.done;
+
+    console.log('[Storage] Migration complete:', { migratedCount });
+    return migratedCount;
+  }
+
+  /**
+   * Check if there are any orphan conversations that need migration
+   */
+  async hasOrphanConversations(): Promise<boolean> {
+    const db = await this.getDB();
+    const tx = db.transaction('conversations', 'readonly');
+    const store = tx.objectStore('conversations');
+
+    let cursor = await store.openCursor();
+
+    while (cursor) {
+      const conversation = cursor.value;
+      if (!conversation.userId || conversation.userId === 'anonymous' || conversation.userId === 'local') {
+        return true;
+      }
+      cursor = await cursor.continue();
+    }
+
+    return false;
   }
 }
 

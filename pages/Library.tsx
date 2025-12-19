@@ -2,9 +2,11 @@ import React, { useState, useRef, useCallback } from 'react';
 import { Conversation } from '../types';
 import { formatTime, cn } from '../utils';
 import { transcriptionService } from '../services/transcriptionService';
+import { alignmentService, fetchAudioBlob } from '../services/alignmentService';
 import { useConversations } from '../contexts/ConversationContext';
 import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Database } from 'lucide-react';
 import { Button } from '../components/Button';
+import { UserMenu } from '../components/auth/UserMenu';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -40,13 +42,16 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
              </div>
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
-          <Button
-            onClick={() => setIsModalOpen(true)}
-            className="gap-2 shadow-lg shadow-blue-500/20"
-          >
-             <UploadCloud size={18} />
-             Upload Audio
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={() => setIsModalOpen(true)}
+              className="gap-2 shadow-lg shadow-blue-500/20"
+            >
+              <UploadCloud size={18} />
+              Upload Audio
+            </Button>
+            <UserMenu />
+          </div>
         </div>
 
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -140,7 +145,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
 
 const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation) => Promise<void> }> = ({ onClose, onUpload }) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'saving' | 'done' | 'error'>('idle');
+  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'aligning' | 'saving' | 'done' | 'error'>('idle');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -183,10 +188,17 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
     setErrorMessage(null);
 
     try {
+      // Step 1: Gemini transcription and analysis
       const conversation = await transcriptionService.processAudio(selectedFile);
 
+      // Step 2: WhisperX timestamp alignment (auto-align for accuracy)
+      setUploadState('aligning');
+      const audioBlob = await fetchAudioBlob(conversation.audioUrl);
+      const alignedConversation = await alignmentService.align(conversation, audioBlob);
+
+      // Step 3: Save to library
       setUploadState('saving');
-      await onUpload(conversation);
+      await onUpload(alignedConversation);
 
       setUploadState('done');
     } catch (error) {
@@ -263,6 +275,12 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
                   <h3 className="text-lg font-medium text-slate-900">Processing with Gemini...</h3>
                   <p className="text-slate-500 text-sm mt-1">Transcribing and analyzing speakers</p>
                 </>
+              ) : uploadState === 'aligning' ? (
+                <>
+                  <Loader2 size={40} className="text-purple-500 animate-spin mb-4" />
+                  <h3 className="text-lg font-medium text-slate-900">Aligning timestamps...</h3>
+                  <p className="text-slate-500 text-sm mt-1">Using WhisperX for precise timing</p>
+                </>
               ) : uploadState === 'saving' ? (
                 <>
                   <Loader2 size={40} className="text-blue-500 animate-spin mb-4" />
@@ -290,13 +308,13 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
 
         {/* Footer */}
         <div className="bg-slate-50 px-6 py-4 flex justify-end gap-3">
-          <Button variant="ghost" onClick={onClose} disabled={uploadState === 'uploading' || uploadState === 'saving'}>
+          <Button variant="ghost" onClick={onClose} disabled={uploadState === 'uploading' || uploadState === 'aligning' || uploadState === 'saving'}>
             Cancel
           </Button>
           <Button
             onClick={handleStartUpload}
             disabled={!selectedFile || (uploadState !== 'idle' && uploadState !== 'error')}
-            className={cn((uploadState === 'uploading' || uploadState === 'saving' || uploadState === 'done') && "opacity-0 hidden")}
+            className={cn((uploadState === 'uploading' || uploadState === 'aligning' || uploadState === 'saving' || uploadState === 'done') && "opacity-0 hidden")}
           >
             Process Recording
           </Button>

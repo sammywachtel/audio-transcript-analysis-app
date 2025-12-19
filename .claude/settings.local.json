@@ -9,7 +9,12 @@
       "Bash(docker-compose down:*)",
       "Bash(docker-compose up:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run test:run:*)",
+      "Bash(tree:*)"
     ]
   }
 }
