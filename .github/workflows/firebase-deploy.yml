@@ -48,6 +48,11 @@ jobs:
     name: Deploy to Firebase
     runs-on: ubuntu-latest
 
+    # Required for google-github-actions/auth
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -59,15 +64,19 @@ jobs:
           cache: 'npm'
           cache-dependency-path: functions/package-lock.json
 
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
-      - name: Authenticate with Firebase
-        env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - name: Verify Authentication
         run: |
-          echo "$FIREBASE_SERVICE_ACCOUNT" > /tmp/firebase-sa.json
-          export GOOGLE_APPLICATION_CREDENTIALS="/tmp/firebase-sa.json"
+          echo "Checking authentication..."
+          firebase projects:list
           firebase use ${{ env.FIREBASE_PROJECT_ID }}
 
       # Build Cloud Functions (only if deploying functions)
@@ -81,39 +90,24 @@ jobs:
         working-directory: functions
         run: npm run build
 
-      - name: Lint Cloud Functions
-        if: github.event.inputs.deploy_target != 'rules-only'
-        working-directory: functions
-        run: npm run lint || true  # Don't fail on lint warnings
-
       # Deploy based on target
       - name: Deploy All (rules + functions)
         if: github.event.inputs.deploy_target == 'all' || github.event.inputs.deploy_target == ''
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
         run: |
           firebase deploy --only firestore:rules,firestore:indexes,storage,functions --force
 
       - name: Deploy Rules Only
         if: github.event.inputs.deploy_target == 'rules-only'
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
         run: |
           firebase deploy --only firestore:rules,firestore:indexes,storage --force
 
       - name: Deploy Functions Only
         if: github.event.inputs.deploy_target == 'functions-only'
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: /tmp/firebase-sa.json
         run: |
           firebase deploy --only functions --force
 
-      # Cleanup
-      - name: Cleanup credentials
-        if: always()
-        run: rm -f /tmp/firebase-sa.json
-
       - name: Deployment Summary
+        if: success()
         run: |
           echo "## Firebase Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
