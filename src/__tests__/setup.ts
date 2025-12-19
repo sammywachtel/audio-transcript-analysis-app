@@ -32,16 +32,32 @@ vi.mock('firebase/auth', async () => {
 // Mock firebase-config to prevent initialization errors
 vi.mock('../../firebase-config', () => ({
   auth: {},
-  googleProvider: {}
+  googleProvider: {},
+  db: {},
+  storage: {},
+  functions: {}
 }));
 
-// Mock conversation storage to prevent IndexedDB operations
-vi.mock('../../services/conversationStorage', async () => {
-  const { mockConversationStorage } = await import('./mocks/conversationStorage');
-  return {
-    conversationStorage: mockConversationStorage
-  };
-});
+// Mock Firestore service
+vi.mock('../../services/firestoreService', () => ({
+  firestoreService: {
+    subscribeToUserConversations: vi.fn(() => () => {}), // Returns unsubscribe function
+    save: vi.fn(),
+    delete: vi.fn(),
+    getById: vi.fn()
+  },
+  FirestoreService: vi.fn()
+}));
+
+// Mock Storage service
+vi.mock('../../services/storageService', () => ({
+  storageService: {
+    uploadAudio: vi.fn(),
+    getAudioUrl: vi.fn(),
+    deleteAudio: vi.fn()
+  },
+  StorageService: vi.fn()
+}));
 
 // Cleanup after each test - prevents state leakage between tests
 afterEach(() => {

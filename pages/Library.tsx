@@ -1,15 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Conversation } from '../types';
-import { formatTime, cn } from '../utils';
-import { transcriptionService } from '../services/transcriptionService';
-import { alignmentService, fetchAudioBlob } from '../services/alignmentService';
+import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Database, Cloud, CloudOff, RefreshCw } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
-
-// Feature flag for cloud storage display
-const USE_FIRESTORE = import.meta.env.VITE_USE_FIRESTORE === 'true';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -33,15 +28,6 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
 
   // Sync status indicator
   const SyncStatusBadge = () => {
-    if (!USE_FIRESTORE) {
-      return (
-        <span className="px-2 py-0.5 rounded-full bg-slate-200/60 text-slate-600 text-[10px] font-medium border border-slate-300/50 flex items-center gap-1.5 cursor-help" title="Data is stored locally in this browser. It does not sync across devices.">
-          <Database size={10} />
-          Local Storage
-        </span>
-      );
-    }
-
     switch (syncStatus) {
       case 'synced':
         return (
@@ -188,7 +174,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
 
 const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation, audioFile?: File) => Promise<void> }> = ({ onClose, onUpload }) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'aligning' | 'saving' | 'done' | 'error'>('idle');
+  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'saving' | 'done' | 'error'>('idle');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -231,23 +217,19 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
     setErrorMessage(null);
 
     try {
-      // Step 1: Gemini transcription and analysis
-      const conversation = await transcriptionService.processAudio(selectedFile);
+      // Create placeholder conversation - Cloud Function will process and update
+      const conversation = createMockConversation(selectedFile);
 
-      // Step 2: WhisperX timestamp alignment (auto-align for accuracy)
-      setUploadState('aligning');
-      const audioBlob = await fetchAudioBlob(conversation.audioUrl);
-      const alignedConversation = await alignmentService.align(conversation, audioBlob);
-
-      // Step 3: Save to library (pass original file for Firebase Storage upload)
+      // Upload audio to Firebase Storage + save metadata to Firestore
+      // This triggers the Cloud Function which will process with Gemini
       setUploadState('saving');
-      await onUpload(alignedConversation, selectedFile);
+      await onUpload(conversation, selectedFile);
 
       setUploadState('done');
     } catch (error) {
       console.error(error);
       setUploadState('error');
-      setErrorMessage("Failed to process audio. Please check your API key and try again.");
+      setErrorMessage("Failed to upload audio. Please try again.");
     }
   };
 
@@ -306,7 +288,7 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
                     <UploadCloud size={24} />
                   </div>
                   <p className="font-medium text-slate-900">Click to upload or drag and drop</p>
-                  <p className="text-sm mt-1">MP3, M4A, WAV (Max 20MB)</p>
+                  <p className="text-sm mt-1">MP3, M4A, WAV (Max 100MB)</p>
                 </div>
               )}
             </div>
@@ -315,27 +297,22 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
               {uploadState === 'uploading' ? (
                 <>
                   <Loader2 size={40} className="text-blue-500 animate-spin mb-4" />
-                  <h3 className="text-lg font-medium text-slate-900">Processing with Gemini...</h3>
-                  <p className="text-slate-500 text-sm mt-1">Transcribing and analyzing speakers</p>
-                </>
-              ) : uploadState === 'aligning' ? (
-                <>
-                  <Loader2 size={40} className="text-purple-500 animate-spin mb-4" />
-                  <h3 className="text-lg font-medium text-slate-900">Aligning timestamps...</h3>
-                  <p className="text-slate-500 text-sm mt-1">Using WhisperX for precise timing</p>
+                  <h3 className="text-lg font-medium text-slate-900">Preparing upload...</h3>
+                  <p className="text-slate-500 text-sm mt-1">Getting ready to process</p>
                 </>
               ) : uploadState === 'saving' ? (
                 <>
                   <Loader2 size={40} className="text-blue-500 animate-spin mb-4" />
-                  <h3 className="text-lg font-medium text-slate-900">Saving to Library...</h3>
-                  <p className="text-slate-500 text-sm mt-1">Storing audio and metadata</p>
+                  <h3 className="text-lg font-medium text-slate-900">Uploading to cloud...</h3>
+                  <p className="text-slate-500 text-sm mt-1">Audio will be processed server-side</p>
                 </>
               ) : (
                 <>
                   <div className="w-12 h-12 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4 animate-in zoom-in">
                     <FileAudio size={24} />
                   </div>
-                  <h3 className="text-lg font-medium text-slate-900">Ready!</h3>
+                  <h3 className="text-lg font-medium text-slate-900">Uploaded!</h3>
+                  <p className="text-slate-500 text-sm mt-1">Processing will complete shortly</p>
                 </>
               )}
             </div>
@@ -351,15 +328,15 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
 
         {/* Footer */}
         <div className="bg-slate-50 px-6 py-4 flex justify-end gap-3">
-          <Button variant="ghost" onClick={onClose} disabled={uploadState === 'uploading' || uploadState === 'aligning' || uploadState === 'saving'}>
+          <Button variant="ghost" onClick={onClose} disabled={uploadState === 'uploading' || uploadState === 'saving'}>
             Cancel
           </Button>
           <Button
             onClick={handleStartUpload}
             disabled={!selectedFile || (uploadState !== 'idle' && uploadState !== 'error')}
-            className={cn((uploadState === 'uploading' || uploadState === 'aligning' || uploadState === 'saving' || uploadState === 'done') && "opacity-0 hidden")}
+            className={cn((uploadState === 'uploading' || uploadState === 'saving' || uploadState === 'done') && "opacity-0 hidden")}
           >
-            Process Recording
+            Upload Recording
           </Button>
         </div>
       </div>

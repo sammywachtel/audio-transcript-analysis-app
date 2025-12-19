@@ -7,7 +7,6 @@ import {
   GoogleAuthProvider
 } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase-config';
-import { conversationStorage } from '../services/conversationStorage';
 
 interface AuthContextValue {
   user: User | null;
@@ -26,7 +25,6 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  * Handles:
  * - Google OAuth sign-in via popup
  * - Session persistence and restoration
- * - Auto-migration of orphan conversations on first sign-in
  * - Cross-tab auth state synchronization
  *
  * The Firebase SDK automatically refreshes tokens and syncs auth state
@@ -50,35 +48,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           email: firebaseUser?.email
         });
 
-        // Check if this is a new sign-in (user was null, now has value)
-        const isNewSignIn = !user && !!firebaseUser;
-
         setUser(firebaseUser);
         setLoading(false);
-
-        // On first sign-in, migrate any orphan conversations to this user
-        if (isNewSignIn && firebaseUser) {
-          try {
-            const hasOrphans = await conversationStorage.hasOrphanConversations();
-
-            if (hasOrphans) {
-              console.log('[Auth] Found orphan conversations, starting migration...');
-              const migratedCount = await conversationStorage.migrateOrphanConversations(
-                firebaseUser.uid
-              );
-
-              if (migratedCount > 0) {
-                console.log(`[Auth] Successfully migrated ${migratedCount} conversation(s) to user ${firebaseUser.uid}`);
-                // Could show a toast notification here: "Migrated X conversations to your account"
-              }
-            } else {
-              console.log('[Auth] No orphan conversations to migrate');
-            }
-          } catch (e) {
-            console.error('[Auth] Failed to migrate orphan conversations:', e);
-            // Non-fatal error - user can still proceed
-          }
-        }
       },
       (err) => {
         console.error('[Auth] Auth state observer error:', err);
@@ -92,7 +63,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       console.log('[Auth] Cleaning up auth state listener');
       unsubscribe();
     };
-  }, [user]); // Depend on user to detect new sign-ins
+  }, []);
 
   /**
    * Sign in with Google using popup flow
@@ -153,7 +124,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   /**
    * Sign out the current user
-   * Note: Does NOT delete local conversations - they remain in IndexedDB
    */
   const signOut = async () => {
     try {
