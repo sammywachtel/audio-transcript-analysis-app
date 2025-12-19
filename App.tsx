@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Library } from './pages/Library';
 import { Viewer } from './pages/Viewer';
+import { AuthProvider } from './contexts/AuthContext';
 import { ConversationProvider, useConversations } from './contexts/ConversationContext';
+import { ProtectedRoute } from './components/auth/ProtectedRoute';
 
 /**
  * AppContent - Main app routing logic
@@ -39,16 +41,28 @@ function AppContent() {
 }
 
 /**
- * App - Root component with Context Provider
+ * App - Root component with nested Context Providers
  *
- * Wraps everything in ConversationProvider so child components
- * can access conversation state via useConversations hook.
+ * Provider hierarchy (outer to inner):
+ * 1. AuthProvider - Manages user authentication state
+ * 2. ConversationProvider - Manages conversation state (depends on auth)
+ * 3. ProtectedRoute - Gates access to app content (requires auth)
+ * 4. AppContent - Main app UI
+ *
+ * This structure ensures:
+ * - Auth state is available to ConversationProvider
+ * - Conversations are filtered by authenticated user
+ * - Users must sign in before accessing the app
  */
 function App() {
   return (
-    <ConversationProvider>
-      <AppContent />
-    </ConversationProvider>
+    <AuthProvider>
+      <ConversationProvider>
+        <ProtectedRoute>
+          <AppContent />
+        </ProtectedRoute>
+      </ConversationProvider>
+    </AuthProvider>
   );
 }
 

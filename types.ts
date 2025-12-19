@@ -47,8 +47,10 @@ export interface Segment {
 
 export interface Conversation {
   conversationId: string;
+  userId: string; // Owner's Firebase UID - isolates data per user
   title: string;
   createdAt: string;
+  updatedAt: string; // For sync conflict resolution and tracking
   durationMs: number;
   audioUrl?: string; // Added field for real audio playback
   status: 'processing' | 'needs_review' | 'complete' | 'failed';
@@ -60,6 +62,10 @@ export interface Conversation {
   people: Person[];
   // WhisperX alignment status - prevents drift correction from re-scaling aligned timestamps
   alignmentStatus?: 'none' | 'aligned' | 'drift_corrected';
+
+  // Sync metadata (future use for Firestore sync)
+  syncStatus?: 'local_only' | 'synced' | 'pending_upload' | 'conflict';
+  lastSyncedAt?: string;
 }
 
 export interface PlaybackState {

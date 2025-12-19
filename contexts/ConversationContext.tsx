@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { Conversation } from '../types';
 import { conversationStorage } from '../services/conversationStorage';
 import { MOCK_CONVERSATION } from '../constants';
+import { useAuth } from './AuthContext';
 
 interface ConversationContextValue {
   // State
@@ -28,9 +29,13 @@ const ConversationContext = createContext<ConversationContextValue | null>(null)
  * This context separates data management from UI rendering.
  * Components can subscribe to conversation state without knowing
  * about IndexedDB, API calls, or other implementation details.
+ *
+ * Now integrated with AuthContext to filter conversations by userId.
+ * Only loads and displays conversations belonging to the current user.
  */
 export const ConversationProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [conversations, setConversations] = useState<Conversation[]>([MOCK_CONVERSATION]);
+  const { user } = useAuth();
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -38,55 +43,87 @@ export const ConversationProvider: React.FC<{ children: ReactNode }> = ({ childr
   const activeConversation = conversations.find(c => c.conversationId === activeConversationId) || null;
 
   /**
-   * Load all conversations from storage on mount
+   * Load conversations for the current user
+   * Only loads conversations that belong to the authenticated user
    */
   const loadConversations = useCallback(async () => {
+    if (!user) {
+      console.log('[ConversationContext] No user, skipping conversation load');
+      setConversations([]);
+      setIsLoaded(true);
+      return;
+    }
+
     try {
-      const stored = await conversationStorage.loadAll();
-      if (stored.length > 0) {
-        setConversations(stored);
-      }
+      console.log('[ConversationContext] Loading conversations for user:', user.uid);
+      const stored = await conversationStorage.loadAllForUser(user.uid);
+      setConversations(stored);
+      console.log('[ConversationContext] Loaded conversations:', stored.length);
     } catch (e) {
-      console.error("Failed to load conversations from storage", e);
-      // Don't throw - just keep the mock data loaded
+      console.error("[ConversationContext] Failed to load conversations from storage", e);
+      // Non-fatal - just show empty state
+      setConversations([]);
     } finally {
       setIsLoaded(true);
     }
-  }, []);
+  }, [user]);
 
   /**
    * Add a new conversation (typically after upload/processing)
+   * Automatically associates the conversation with the current user
    */
   const addConversation = useCallback(async (conversation: Conversation) => {
+    if (!user) {
+      throw new Error("Must be signed in to save conversations");
+    }
+
     try {
+      // Ensure conversation has userId and updatedAt
+      const conversationWithUser: Conversation = {
+        ...conversation,
+        userId: user.uid,
+        updatedAt: conversation.updatedAt || new Date().toISOString()
+      };
+
       // Persist first for data safety
-      await conversationStorage.save(conversation);
+      await conversationStorage.save(conversationWithUser);
 
       // Then update UI
-      setConversations(prev => [conversation, ...prev]);
+      setConversations(prev => [conversationWithUser, ...prev]);
     } catch (err) {
       console.error("Failed to save conversation", err);
       throw new Error("Failed to save conversation to storage. Please try again.");
     }
-  }, []);
+  }, [user]);
 
   /**
    * Update an existing conversation (e.g., speaker rename, person notes)
+   * Updates the updatedAt timestamp automatically
    */
   const updateConversation = useCallback(async (conversation: Conversation) => {
+    if (!user) {
+      throw new Error("Must be signed in to update conversations");
+    }
+
+    // Add updatedAt timestamp
+    const conversationWithTimestamp: Conversation = {
+      ...conversation,
+      updatedAt: new Date().toISOString()
+    };
+
     // Update UI immediately for responsive feel
     setConversations(prev =>
-      prev.map(c => c.conversationId === conversation.conversationId ? conversation : c)
+      prev.map(c => c.conversationId === conversationWithTimestamp.conversationId ? conversationWithTimestamp : c)
     );
 
     // Persist in background
     try {
-      await conversationStorage.save(conversation);
+      await conversationStorage.save(conversationWithTimestamp);
     } catch (err) {
       console.error("Failed to persist conversation update", err);
       // Already updated UI, so just log the error
     }
-  }, []);
+  }, [user]);
 
   /**
    * Delete a conversation

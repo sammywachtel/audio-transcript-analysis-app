@@ -136,14 +136,19 @@ export const useAudioPlayer = (
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
 
-    // Error handler
-    audio.addEventListener('error', (e) => {
+    // Error handler - ignore expected cleanup errors
+    const errorHandler = (e: Event) => {
       const error = audio.error;
-      console.error('[AudioPlayer] Audio error:', {
-        code: error?.code,
-        message: error?.message
-      });
-    });
+      // Code 4 = MEDIA_ELEMENT_ERROR (usually from clearing src during cleanup)
+      // Only log unexpected errors
+      if (error?.code !== 4) {
+        console.error('[AudioPlayer] Audio error:', {
+          code: error?.code,
+          message: error?.message
+        });
+      }
+    };
+    audio.addEventListener('error', errorHandler);
 
     audio.addEventListener('canplay', () => {
       console.log('[AudioPlayer] canplay - ready to play');
@@ -287,6 +292,8 @@ export const useAudioPlayer = (
     return () => {
       console.log('[AudioPlayer] Cleanup running');
       audio.pause();
+      // Remove error listener before clearing src to avoid unnecessary error events
+      audio.removeEventListener('error', errorHandler);
       audio.src = '';
       audioRef.current = null;
       lastAudioUrlRef.current = undefined;
