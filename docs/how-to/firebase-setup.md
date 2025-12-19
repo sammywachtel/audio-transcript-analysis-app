@@ -2,11 +2,53 @@
 
 Complete guide to setting up Firebase for the Audio Transcript Analysis App.
 
+## Quick Start: Automated Setup
+
+For a fresh project setup, use the automated script that handles everything:
+
+```bash
+# Prerequisites: gcloud, firebase, jq, gsutil must be installed
+
+# Find your billing account ID
+gcloud billing accounts list
+
+# Run the setup script
+./scripts/gcp-setup.sh <project-id> <billing-account-id>
+
+# Example:
+./scripts/gcp-setup.sh audio-transcript-app-67465 01A2B3-C4D5E6-F7G8H9
+```
+
+The script is **idempotent** - safe to rerun if it fails partway through. It will skip steps that are already complete.
+
+**What the script does:**
+1. Creates GCP project (or uses existing)
+2. Links billing account
+3. Adds Firebase to the project
+4. Enables all required APIs
+5. Configures all IAM bindings (deployment SA, runtime SA, service agents)
+6. Initializes Firestore
+7. Configures Storage bucket permissions
+8. Optionally creates service account key for CI/CD
+9. Optionally sets GEMINI_API_KEY secret
+
+**After running the script:**
+1. Enable Google Auth manually (link provided in output)
+2. Get Firebase web config and update `.env`
+3. Add service account key to GitHub Secrets
+
+---
+
+## Manual Setup (Reference)
+
+If you prefer manual setup or need to understand each step, follow the sections below.
+
 ## Prerequisites
 
 - Google account
 - [Firebase CLI](https://firebase.google.com/docs/cli): `npm install -g firebase-tools`
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (optional, for advanced configuration)
+- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (required for full setup)
+- `jq` for JSON parsing: `brew install jq` (macOS) or `apt install jq` (Linux)
 
 ## Step 1: Create Firebase Project
 

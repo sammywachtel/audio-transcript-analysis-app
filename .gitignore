@@ -33,6 +33,11 @@ dist-ssr
 .env
 .env.local
 
+# Service account keys (never commit these!)
+firebase-sa-key.json
+*-service-account*.json
+*-credentials*.json
+
 # Quality gate files
 .quality-config.yaml.bak
 .quality-baseline.json
