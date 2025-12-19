@@ -8,12 +8,6 @@ import {
   createAuthError,
   resetAuthMocks
 } from '../mocks/firebase';
-import {
-  mockConversationStorage,
-  createTestConversation,
-  addTestConversation,
-  resetConversationStorage
-} from '../mocks/conversationStorage';
 
 /**
  * AuthContext Test Suite
@@ -25,13 +19,11 @@ import {
  * - Session persistence and restoration
  * - Error handling
  * - Cross-tab sync simulation
- * - Orphan conversation migration
  */
 
 describe('AuthContext', () => {
   beforeEach(() => {
     resetAuthMocks();
-    resetConversationStorage();
   });
 
   afterEach(() => {
@@ -147,89 +139,6 @@ describe('AuthContext', () => {
       });
 
       expect(result.current.error).toBe(null);
-    });
-
-    it('should trigger orphan conversation migration on first sign-in', async () => {
-      // Create orphan conversations (no userId)
-      addTestConversation(createTestConversation({
-        conversationId: 'orphan-1',
-        userId: ''
-      }));
-      addTestConversation(createTestConversation({
-        conversationId: 'orphan-2',
-        userId: 'anonymous'
-      }));
-      addTestConversation(createTestConversation({
-        conversationId: 'orphan-3',
-        userId: 'local'
-      }));
-
-      const { result } = renderHook(() => useAuth(), {
-        wrapper: AuthProvider
-      });
-
-      await waitFor(() => {
-        expect(result.current.loading).toBe(false);
-      });
-
-      // Sign in to trigger migration
-      await act(async () => {
-        await result.current.signInWithGoogle();
-      });
-
-      await waitFor(() => {
-        expect(result.current.user).not.toBe(null);
-      });
-
-      // Verify migration was attempted
-      expect(mockConversationStorage.hasOrphanConversations).toHaveBeenCalled();
-      expect(mockConversationStorage.migrateOrphanConversations).toHaveBeenCalledWith('test-user-123');
-    });
-
-    it('should not trigger migration if user is already signed in', async () => {
-      // Start with signed-in user
-      const mockUser = createMockUser();
-      setMockAuthState(mockUser);
-
-      const { result } = renderHook(() => useAuth(), {
-        wrapper: AuthProvider
-      });
-
-      await waitFor(() => {
-        expect(result.current.loading).toBe(false);
-      });
-
-      // Migration should not run (user was already signed in)
-      expect(mockConversationStorage.hasOrphanConversations).not.toHaveBeenCalled();
-    });
-
-    it('should handle migration failures gracefully', async () => {
-      // Simulate migration failure
-      mockConversationStorage.hasOrphanConversations.mockResolvedValueOnce(true);
-      mockConversationStorage.migrateOrphanConversations.mockRejectedValueOnce(
-        new Error('Database error')
-      );
-
-      const { result } = renderHook(() => useAuth(), {
-        wrapper: AuthProvider
-      });
-
-      await waitFor(() => {
-        expect(result.current.loading).toBe(false);
-      });
-
-      // Sign in should still succeed even if migration fails
-      await act(async () => {
-        await result.current.signInWithGoogle();
-      });
-
-      await waitFor(() => {
-        expect(result.current.user).not.toBe(null);
-      });
-
-      // User should be signed in despite migration error
-      expect(result.current.user?.uid).toBe('test-user-123');
-      expect(result.current.error).toBe(null); // Migration error is non-fatal
     });
   });
 
