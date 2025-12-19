@@ -212,7 +212,30 @@ gcloud projects add-iam-policy-binding $PROJECT \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-### 3. Add GitHub Secrets
+### 3. Grant Secret Access to Cloud Functions Runtime
+
+> **Important**: Cloud Functions run under a *different* service account than the one used for deployment. The runtime service account also needs secret access.
+
+The default runtime service account is the **Compute Engine default service account**:
+```
+PROJECT_NUMBER-compute@developer.gserviceaccount.com
+```
+
+Find your project number in [Project Settings](https://console.cloud.google.com/iam-admin/settings) or via CLI:
+```bash
+gcloud projects describe your-project-id --format="value(projectNumber)"
+```
+
+Grant secret access to the runtime service account:
+```bash
+PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+
+gcloud projects add-iam-policy-binding your-project-id \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+### 4. Add GitHub Secrets
 
 In your repository: **Settings** → **Secrets and variables** → **Actions**
 
@@ -251,21 +274,43 @@ npx firebase deploy --only firestore:rules
 
 ### "secretmanager.secrets.get" permission denied for GEMINI_API_KEY
 
-**Cause**: Either the secret doesn't exist OR the service account is missing the Secret Accessor role.
+**Cause**: One of three issues:
+1. The secret doesn't exist
+2. The deployment service account (`firebase-adminsdk-*`) is missing Secret Accessor role
+3. The **runtime** service account (`PROJECT_NUMBER-compute@...`) is missing Secret Accessor role
 
 **Solution**:
 
-1. **First, ensure the secret exists** (run locally):
+1. **Ensure the secret exists** (run locally):
    ```bash
    npx firebase login
    npx firebase use your-project-id
    npx firebase functions:secrets:set GEMINI_API_KEY
    ```
 
-2. **Then, verify the service account has the role**:
-   Add `Secret Manager Secret Accessor` role to the service account in [Google Cloud IAM](https://console.cloud.google.com/iam-admin/iam).
+2. **Grant secret access to BOTH service accounts**:
+   ```bash
+   # Deployment service account
+   gcloud projects add-iam-policy-binding your-project-id \
+     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
 
-> **Note**: The error message "(or it may not exist)" usually means the secret was never created. Step 8 must be completed locally before CI/CD will work.
+   # Runtime service account (required!)
+   PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+   gcloud projects add-iam-policy-binding your-project-id \
+     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+
+3. **Verify both have the role**:
+   ```bash
+   gcloud projects get-iam-policy your-project-id \
+     --flatten="bindings[].members" \
+     --filter="bindings.role:secretmanager.secretAccessor" \
+     --format="table(bindings.members)"
+   ```
+
+> **Note**: Firebase validates secret access for the **runtime** service account during deployment. Even if your deployment SA has access, the function's runtime SA also needs it.
 
 ## Verification
 
