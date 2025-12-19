@@ -216,22 +216,15 @@ gcloud projects add-iam-policy-binding $PROJECT \
 
 > **Important**: Cloud Functions run under a *different* service account than the one used for deployment. The runtime service account also needs secret access.
 
-The default runtime service account is the **Compute Engine default service account**:
+The default runtime service account is the **App Engine default service account**:
 ```
-PROJECT_NUMBER-compute@developer.gserviceaccount.com
-```
-
-Find your project number in [Project Settings](https://console.cloud.google.com/iam-admin/settings) or via CLI:
-```bash
-gcloud projects describe your-project-id --format="value(projectNumber)"
+your-project-id@appspot.gserviceaccount.com
 ```
 
 Grant secret access to the runtime service account:
 ```bash
-PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
-
 gcloud projects add-iam-policy-binding your-project-id \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
@@ -277,7 +270,7 @@ npx firebase deploy --only firestore:rules
 **Cause**: One of three issues:
 1. The secret doesn't exist
 2. The deployment service account (`firebase-adminsdk-*`) is missing Secret Accessor role
-3. The **runtime** service account (`PROJECT_NUMBER-compute@...`) is missing Secret Accessor role
+3. The **runtime** service account (`your-project-id@appspot.gserviceaccount.com`) is missing Secret Accessor role
 
 **Solution**:
 
@@ -295,10 +288,9 @@ npx firebase deploy --only firestore:rules
      --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
      --role="roles/secretmanager.secretAccessor"
 
-   # Runtime service account (required!)
-   PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+   # Runtime service account (App Engine default - required!)
    gcloud projects add-iam-policy-binding your-project-id \
-     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+     --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
      --role="roles/secretmanager.secretAccessor"
    ```
 
