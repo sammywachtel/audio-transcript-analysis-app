@@ -35,6 +35,7 @@ Enable each API by clicking the links below:
 | **Firestore** | Database | [Enable](https://console.cloud.google.com/apis/library/firestore.googleapis.com) |
 | **Cloud Run** | Host frontend | [Enable](https://console.cloud.google.com/apis/library/run.googleapis.com) |
 | **IAM Credentials** | Workload Identity | [Enable](https://console.cloud.google.com/apis/library/iamcredentials.googleapis.com) |
+| **Eventarc** | Cloud Functions v2 event triggers | [Enable](https://console.cloud.google.com/apis/library/eventarc.googleapis.com) |
 | **Firebase Extensions** | Firebase deployment features | [Enable](https://console.cloud.google.com/apis/library/firebaseextensions.googleapis.com) |
 
 ### Via CLI
@@ -50,6 +51,7 @@ gcloud services enable \
   firestore.googleapis.com \
   run.googleapis.com \
   iamcredentials.googleapis.com \
+  eventarc.googleapis.com \
   firebaseextensions.googleapis.com \
   --project=$PROJECT_ID
 ```
