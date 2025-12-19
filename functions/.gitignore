@@ -1,0 +1,14 @@
+# Compiled JavaScript files
+lib/
+
+# Node.js
+node_modules/
+
+# Firebase secrets
+.secret.local
+
+# Local config
+*.local
+
+# OS files
+.DS_Store
