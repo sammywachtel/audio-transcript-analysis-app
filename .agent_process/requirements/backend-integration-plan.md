@@ -641,14 +641,153 @@ const processAudio = async (audioFile: File) => {
 - `speaker-naming-requirements.md` - Applies to both client and server processing
 
 ## Status
-- **Current**: Planning stage
-- **Next**: Implement after Google Auth is complete
-- **Blocked by**: Authentication implementation
+- **Current**: Implementation in progress
+- **Firebase Project**: `audio-transcript-app-67465`
+- **Auth**: ✅ Complete (Google OAuth implemented)
 
-## Questions to Resolve
+## Implementation Decisions
 
-1. **Hybrid vs Full Backend**: Keep small files client-side or move everything?
-2. **Storage Strategy**: How long to keep audio files? Auto-delete after X days?
-3. **Quotas**: Implement per-user upload limits?
-4. **Pricing**: Pass costs to users or keep free initially?
-5. **Data Retention**: Policy for inactive accounts?
+1. **Hybrid Approach**: Small files (<10MB) processed client-side for speed, larger files use Cloud Functions
+2. **Storage Strategy**: Audio files retained indefinitely (user can delete manually)
+3. **Quotas**: No limits initially (monitor usage, add if needed)
+4. **Pricing**: Free tier initially (Spark plan)
+5. **Data Retention**: No auto-deletion policy (users manage their own data)
+
+## Implementation Progress
+
+### Phase 1: Firebase Configuration ✅
+- [x] Firebase project created: `audio-transcript-app-67465`
+- [x] Firebase Auth enabled with Google Sign-In
+- [x] Firestore database config created (`firestore.rules`, `firestore.indexes.json`)
+- [x] Firebase Storage config created (`storage.rules`)
+- [x] Firebase config file created (`firebase.json`)
+
+### Phase 2: Client Services ✅
+- [x] `services/firestoreService.ts` - Firestore CRUD operations with real-time listeners
+- [x] `services/storageService.ts` - Audio upload/download with signed URLs
+- [x] `firebase-config.ts` updated with Firestore, Storage, and Functions
+
+### Phase 3: Cloud Functions ✅
+- [x] `functions/src/transcribe.ts` - Server-side Gemini API calls (triggered on upload)
+- [x] `functions/src/getAudioUrl.ts` - Signed URL generation with auth
+- [x] `functions/src/index.ts` - Main entry point
+- [ ] Deploy functions to Firebase (requires `firebase deploy --only functions`)
+
+### Phase 4: Context Updates ✅
+- [x] `ConversationContext.tsx` updated for Firestore real-time listeners
+- [x] `Library.tsx` updated with sync status indicator and new upload flow
+- [x] `services/migrationService.ts` created for IndexedDB → Firestore migration
+
+### Phase 5: Testing & Deployment
+- [ ] Run `npm install` in `functions/` directory
+- [ ] Deploy security rules: `npx firebase deploy --only firestore:rules,storage:rules`
+- [ ] Deploy Cloud Functions: `npx firebase deploy --only functions`
+- [ ] Set Gemini API key secret: `npx firebase functions:secrets:set GEMINI_API_KEY`  <!-- pragma: allowlist secret -->
+- [ ] Enable Firestore in Firebase Console
+- [ ] Enable Cloud Functions in Firebase Console
+- [ ] Set `VITE_USE_FIRESTORE=true` in `.env` to enable cloud mode
+- [ ] Test end-to-end upload and sync
+- [ ] Verify multi-user data isolation
+
+### Phase 6: CI/CD Setup ✅
+- [x] Created `scripts/setup-firebase.sh` - One-time setup script
+- [x] Created `scripts/deploy-firebase.sh` - Reusable deployment script
+- [x] Created `.github/workflows/firebase-deploy.yml` - GitHub Actions workflow
+
+## CI/CD Configuration
+
+### One-Time Setup (Manual Steps)
+
+These steps must be done once per environment and cannot be fully automated:
+
+1. **Firebase Console Setup**
+   - Enable Firestore Database: https://console.firebase.google.com/project/audio-transcript-app-67465/firestore
+   - Enable Firebase Storage: https://console.firebase.google.com/project/audio-transcript-app-67465/storage
+   - Enable Cloud Functions (requires Blaze plan for external API calls)
+
+2. **Authentication**
+   ```bash
+   npx firebase login
+   npx firebase use audio-transcript-app-67465
+   ```
+
+3. **Set Gemini API Secret**
+   ```bash
+   npx firebase functions:secrets:set GEMINI_API_KEY
+   ```
+
+4. **Create Service Account for CI/CD**
+   - Go to Firebase Console → Project Settings → Service Accounts
+   - Click "Generate new private key"
+   - Download the JSON file
+   - Add as GitHub Secret: `FIREBASE_SERVICE_ACCOUNT`  <!-- pragma: allowlist secret -->
+
+5. **Add GitHub Secrets**
+   - `FIREBASE_SERVICE_ACCOUNT`: Service account JSON key (for deployment)
+   - `GEMINI_API_KEY`: Gemini API key (already set via Firebase secrets)
+
+### Automated Deployment (GitHub Actions)
+
+The workflow in `.github/workflows/firebase-deploy.yml` handles:
+
+**Automatic Triggers:**
+- Push to `main` branch when Firebase-related files change:
+  - `functions/**`
+  - `firestore.rules`, `storage.rules`
+  - `firestore.indexes.json`
+  - `firebase.json`
+
+**Manual Triggers:**
+- Go to Actions → Firebase Deploy → Run workflow
+- Choose deployment target:
+  - `all`: Deploy rules + functions (default)
+  - `rules-only`: Deploy Firestore and Storage rules only
+  - `functions-only`: Deploy Cloud Functions only
+
+### Local Deployment Scripts
+
+**First-time setup (new developer machine):**
+```bash
+./scripts/setup-firebase.sh
+```
+
+**Deploy changes locally:**
+```bash
+# Deploy everything
+./scripts/deploy-firebase.sh
+
+# Deploy only rules
+./scripts/deploy-firebase.sh --rules-only
+
+# Deploy only functions
+./scripts/deploy-firebase.sh --functions
+
+# Preview what would be deployed
+./scripts/deploy-firebase.sh --dry-run
+```
+
+### Environment Recreation
+
+To recreate the Firebase environment from scratch:
+
+1. **Create Firebase Project** (if needed)
+   ```bash
+   npx firebase projects:create audio-transcript-app-67465
+   ```
+
+2. **Run Setup Script**
+   ```bash
+   ./scripts/setup-firebase.sh
+   ```
+
+3. **Configure GitHub Actions**
+   - Add `FIREBASE_SERVICE_ACCOUNT` secret to repository
+   - Workflow will auto-deploy on push to main
+
+### Cost Monitoring
+
+Firebase Blaze plan is pay-as-you-go. Monitor costs at:
+- https://console.firebase.google.com/project/audio-transcript-app-67465/usage/details
+
+Set budget alerts at:
+- https://console.cloud.google.com/billing

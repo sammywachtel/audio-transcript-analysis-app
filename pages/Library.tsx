@@ -4,9 +4,12 @@ import { formatTime, cn } from '../utils';
 import { transcriptionService } from '../services/transcriptionService';
 import { alignmentService, fetchAudioBlob } from '../services/alignmentService';
 import { useConversations } from '../contexts/ConversationContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Database } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Database, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
+
+// Feature flag for cloud storage display
+const USE_FIRESTORE = import.meta.env.VITE_USE_FIRESTORE === 'true';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -14,7 +17,7 @@ interface LibraryProps {
 
 export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const { conversations, addConversation, deleteConversation } = useConversations();
+  const { conversations, addConversation, deleteConversation, syncStatus } = useConversations();
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -23,9 +26,52 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
     }
   };
 
-  const handleUpload = async (conversation: Conversation) => {
-    await addConversation(conversation);
+  const handleUpload = async (conversation: Conversation, audioFile?: File) => {
+    await addConversation(conversation, audioFile);
     setIsModalOpen(false);
+  };
+
+  // Sync status indicator
+  const SyncStatusBadge = () => {
+    if (!USE_FIRESTORE) {
+      return (
+        <span className="px-2 py-0.5 rounded-full bg-slate-200/60 text-slate-600 text-[10px] font-medium border border-slate-300/50 flex items-center gap-1.5 cursor-help" title="Data is stored locally in this browser. It does not sync across devices.">
+          <Database size={10} />
+          Local Storage
+        </span>
+      );
+    }
+
+    switch (syncStatus) {
+      case 'synced':
+        return (
+          <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-medium border border-emerald-200 flex items-center gap-1.5 cursor-help" title="Data syncs in real-time across all your devices.">
+            <Cloud size={10} />
+            Cloud Synced
+          </span>
+        );
+      case 'syncing':
+        return (
+          <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-medium border border-blue-200 flex items-center gap-1.5 cursor-help" title="Syncing with cloud...">
+            <RefreshCw size={10} className="animate-spin" />
+            Syncing
+          </span>
+        );
+      case 'error':
+        return (
+          <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-medium border border-red-200 flex items-center gap-1.5 cursor-help" title="Failed to connect to cloud. Changes may not sync.">
+            <CloudOff size={10} />
+            Sync Error
+          </span>
+        );
+      default:
+        return (
+          <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium border border-amber-200 flex items-center gap-1.5 cursor-help" title="Working offline. Changes will sync when online.">
+            <CloudOff size={10} />
+            Offline
+          </span>
+        );
+    }
   };
 
   return (
@@ -35,10 +81,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
           <div>
              <div className="flex items-center gap-3">
                 <h1 className="text-2xl font-bold text-slate-900">Library</h1>
-                <span className="px-2 py-0.5 rounded-full bg-slate-200/60 text-slate-600 text-[10px] font-medium border border-slate-300/50 flex items-center gap-1.5 cursor-help" title="Data is stored locally in this browser/origin. It does not sync across devices or different URLs.">
-                    <Database size={10} />
-                    Local Storage
-                </span>
+                <SyncStatusBadge />
              </div>
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
@@ -143,7 +186,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen }) => {
 
 // --- Upload Modal Component ---
 
-const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation) => Promise<void> }> = ({ onClose, onUpload }) => {
+const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation, audioFile?: File) => Promise<void> }> = ({ onClose, onUpload }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'aligning' | 'saving' | 'done' | 'error'>('idle');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -196,9 +239,9 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
       const audioBlob = await fetchAudioBlob(conversation.audioUrl);
       const alignedConversation = await alignmentService.align(conversation, audioBlob);
 
-      // Step 3: Save to library
+      // Step 3: Save to library (pass original file for Firebase Storage upload)
       setUploadState('saving');
-      await onUpload(alignedConversation);
+      await onUpload(alignedConversation, selectedFile);
 
       setUploadState('done');
     } catch (error) {

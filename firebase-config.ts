@@ -1,14 +1,25 @@
 import { initializeApp, FirebaseApp } from 'firebase/app';
 import { getAuth, Auth, GoogleAuthProvider } from 'firebase/auth';
+import {
+  getFirestore,
+  Firestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager
+} from 'firebase/firestore';
+import { getStorage, FirebaseStorage } from 'firebase/storage';
+import { getFunctions, Functions, connectFunctionsEmulator } from 'firebase/functions';
 
 /**
  * Firebase Configuration
  *
- * Initializes Firebase services for authentication. Config values are loaded
- * from environment variables (VITE_ prefix required for Vite to expose them).
+ * Initializes Firebase services for the Audio Transcript Analysis App:
+ * - Authentication (Google OAuth)
+ * - Firestore (conversation data)
+ * - Storage (audio files)
+ * - Functions (server-side transcription)
  *
- * Make sure you've created a Firebase project and enabled Google Sign-In at:
- * console.firebase.google.com -> Authentication -> Sign-in method
+ * Config values are loaded from environment variables (VITE_ prefix for Vite).
  */
 
 const firebaseConfig = {
@@ -32,11 +43,11 @@ const missingVars = requiredEnvVars.filter(key => !import.meta.env[key]);
 if (missingVars.length > 0) {
   console.warn(
     `Missing Firebase environment variables: ${missingVars.join(', ')}\n` +
-    `Authentication will not work until these are configured in .env`
+    `Firebase services will not work until these are configured in .env`
   );
 }
 
-// Initialize Firebase
+// Initialize Firebase App
 export const app: FirebaseApp = initializeApp(firebaseConfig);
 
 // Initialize Auth service
@@ -44,12 +55,40 @@ export const auth: Auth = getAuth(app);
 
 // Configure Google Auth Provider
 export const googleProvider = new GoogleAuthProvider();
-
-// Request specific user data scopes
 googleProvider.addScope('profile');
 googleProvider.addScope('email');
 
-// Optional: Force account selection every time (useful during development)
-// googleProvider.setCustomParameters({
-//   prompt: 'select_account'
-// });
+/**
+ * Initialize Firestore with offline persistence
+ *
+ * Using persistentLocalCache for offline support - data is cached in IndexedDB
+ * and synced when back online. This gives us the best of both worlds:
+ * - Fast reads from local cache
+ * - Automatic sync to cloud
+ * - Works offline
+ */
+export const db: Firestore = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
+});
+
+/**
+ * Initialize Firebase Storage
+ * Used for storing audio files (too large for Firestore's 1MB doc limit)
+ */
+export const storage: FirebaseStorage = getStorage(app);
+
+/**
+ * Initialize Cloud Functions
+ * Used for server-side Gemini API calls (keeps API key secure)
+ */
+export const functions: Functions = getFunctions(app);
+
+// Connect to emulators in development
+if (import.meta.env.DEV && import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true') {
+  console.log('[Firebase] Connecting to local emulators...');
+  connectFunctionsEmulator(functions, 'localhost', 5001);
+  // Note: Firestore and Storage emulator connections are handled differently
+  // and typically configured at the service level if needed
+}

@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for Audio Transcript Analysis App
+// Audio files are stored in user-specific directories for isolation
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper function: Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Audio files stored under: audio/{userId}/{conversationId}.{ext}
+    match /audio/{userId}/{fileName} {
+      // Users can only read their own audio files
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+
+      // Users can upload audio to their own directory
+      // Limit file size to 100MB and only allow audio types
+      allow create: if isAuthenticated()
+        && request.auth.uid == userId
+        && request.resource.size < 100 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+
+      // Users can delete their own audio files
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
+
+      // No updates - audio files are immutable (delete and re-upload if needed)
+      allow update: if false;
+    }
+
+    // Thumbnails/waveforms (future feature)
+    match /thumbnails/{userId}/{fileName} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow create: if isAuthenticated()
+        && request.auth.uid == userId
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Block all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
