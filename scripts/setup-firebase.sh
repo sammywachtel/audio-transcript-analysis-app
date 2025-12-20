@@ -1,13 +1,20 @@
 #!/bin/bash
 # =============================================================================
-# Firebase Initial Setup Script
+# Firebase Developer Onboarding Script
 #
-# This script handles ONE-TIME setup that cannot be fully automated:
-# - Authenticating with Firebase
-# - Enabling required Firebase services
-# - Setting up secrets
+# Use this script to set up a DEVELOPER MACHINE for an EXISTING Firebase project.
+# This handles local authentication and configuration.
 #
-# Run this once when setting up a new environment or new developer machine.
+# For creating a NEW project from scratch, use: ./scripts/gcp-setup.sh
+#
+# What this script does:
+# - Authenticates you with Firebase CLI
+# - Sets the active project
+# - Guides you through enabling required services
+# - Sets up the Gemini API secret
+# - Builds and optionally deploys Cloud Functions
+#
+# Run this once when joining the project or setting up a new machine.
 # =============================================================================
 
 set -e
