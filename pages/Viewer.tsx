@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Person } from '../types';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAudioPlayer } from '../hooks/useAudioPlayer';
@@ -34,7 +34,7 @@ interface ViewerProps {
  * This went from 516 lines to ~130 lines. Much easier to reason about.
  */
 export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
-  const { activeConversation, updateConversation } = useConversations();
+  const { activeConversation, updateConversation, getAudioUrl } = useConversations();
 
   // Bail if no active conversation (shouldn't happen, but TypeScript safety)
   if (!activeConversation) {
@@ -44,6 +44,26 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
   const [conversation, setConversation] = useState(activeConversation);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [alignmentStatus, setAlignmentStatus] = useState<AlignmentStatus>('idle');
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  // Fetch audio URL from Firebase Storage on mount
+  // The URL is generated on-demand because Storage download URLs expire
+  useEffect(() => {
+    const fetchUrl = async () => {
+      if (!activeConversation.conversationId) return;
+
+      console.log('[Viewer] Fetching audio URL for conversation:', activeConversation.conversationId);
+      const url = await getAudioUrl(activeConversation.conversationId);
+      if (url) {
+        console.log('[Viewer] Audio URL fetched successfully');
+        setAudioUrl(url);
+      } else {
+        console.log('[Viewer] No audio URL available (audioStoragePath may be missing)');
+      }
+    };
+
+    fetchUrl();
+  }, [activeConversation.conversationId, getAudioUrl]);
 
   // Audio playback logic (drift correction, play/pause, seeking)
   const {
@@ -61,7 +81,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     scrub,
     setSyncOffset
   } = useAudioPlayer(conversation, {
-    audioUrl: conversation.audioUrl,
+    audioUrl: audioUrl ?? undefined,
     initialDuration: conversation.durationMs,
     segments: conversation.segments,
     onDriftCorrected: (fixedConversation) => {
@@ -146,7 +166,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
    * Calls the alignment service to get precise timestamps from forced alignment
    */
   const handleImproveTimestamps = useCallback(async () => {
-    if (!conversation.audioUrl) {
+    if (!audioUrl) {
       console.error('[Alignment] No audio URL available');
       return;
     }
@@ -155,8 +175,8 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
     console.log('[Alignment] Starting timestamp improvement...');
 
     try {
-      // Fetch the audio blob from the blob URL
-      const audioBlob = await fetchAudioBlob(conversation.audioUrl);
+      // Fetch the audio blob from the URL
+      const audioBlob = await fetchAudioBlob(audioUrl);
       console.log('[Alignment] Audio blob fetched:', audioBlob.size, 'bytes');
 
       // Call alignment service
@@ -176,7 +196,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
       // Reset to idle after showing error briefly
       setTimeout(() => setAlignmentStatus('idle'), 3000);
     }
-  }, [conversation, updateConversation]);
+  }, [audioUrl, conversation, updateConversation]);
 
   return (
     <div className="flex flex-col h-screen bg-slate-50">
@@ -191,7 +211,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
         driftMs={driftMs}
         alignmentStatus={alignmentStatus}
         onImproveTimestamps={handleImproveTimestamps}
-        hasAudio={!!conversation.audioUrl}
+        hasAudio={!!audioUrl}
       />
 
       {/* Main Content Split */}
