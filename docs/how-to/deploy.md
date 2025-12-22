@@ -6,9 +6,11 @@ Deploy the Audio Transcript Analysis App to production.
 
 | Component | Platform | Trigger |
 |-----------|----------|---------|
-| Frontend | Cloud Run | Push to `main` |
-| Cloud Functions | Firebase | Push to `main` (when `functions/` changes) |
-| Security Rules | Firebase | Push to `main` (when rules change) |
+| Frontend | Cloud Run | Push to `main` (parallel) |
+| Cloud Functions | Firebase | Push to `main` (parallel) |
+| Security Rules | Firebase | Manual deployment |
+
+**Note:** Frontend and Firebase Functions deploy in parallel on merge to main (~3-4 min total).
 
 ## Prerequisites
 
@@ -52,9 +54,23 @@ Configure in **Settings → Secrets and variables → Actions**:
 | `VITE_FIREBASE_STORAGE_BUCKET` | Storage bucket (e.g., `project-id.firebasestorage.app`) |
 | `VITE_FIREBASE_MESSAGING_SENDER_ID` | Messaging sender ID (project number) |
 | `VITE_FIREBASE_APP_ID` | Firebase app ID |
-| `ALIGNMENT_SERVICE_URL` | (Optional) URL of alignment service |
 
 > **Note**: The `VITE_` prefix is required - Vite only exposes environment variables with this prefix to client-side code.
+
+### Firebase Secrets (One-Time Setup)
+
+These secrets are stored in Firebase Secret Manager, not GitHub:
+
+| Secret | Description | Setup Command |
+|--------|-------------|---------------|
+| `GEMINI_API_KEY` | Google AI Studio API key | `npx firebase functions:secrets:set GEMINI_API_KEY` |
+| `REPLICATE_API_TOKEN` | Replicate API token for WhisperX | `npx firebase functions:secrets:set REPLICATE_API_TOKEN` |
+
+**Important:** Set these secrets before the first deployment:
+```bash
+npx firebase functions:secrets:set GEMINI_API_KEY
+npx firebase functions:secrets:set REPLICATE_API_TOKEN
+```
 
 To get Firebase config values:
 ```bash
@@ -144,8 +160,8 @@ npx firebase functions:log
 # Frontend
 curl https://your-app-url.run.app/health
 
-# Alignment service (if deployed)
-curl https://alignment-service-url.run.app/health
+# Functions (check logs after upload)
+npx firebase functions:log --only transcribeAudio
 ```
 
 ## Rollback
@@ -215,33 +231,7 @@ Set up alerts in Google Cloud Console:
 
 ## Debug Logging
 
-Both containers include comprehensive debug logging for troubleshooting.
-
-### Alignment Service (Cloud Run)
-
-Debug logging is **enabled by default** via `LOG_LEVEL=DEBUG` environment variable set in the deployment workflow.
-
-**To view debug logs:**
-1. Go to **Cloud Run** → **alignment-service** → **Logs**
-2. Click the severity filter dropdown
-3. Select **"Debug"** to include debug-level logs
-
-**Log prefixes to look for:**
-- `[Align]` - Request handling, timing, confidence distribution
-- `[WhisperX]` - Replicate API calls, word timestamps, duration stats
-- `[HARDY]` - Alignment algorithm, anchor detection, region alignment
-- `[Anchors]` - Anchor point matching, skip statistics
-- `[Regions]` - Region segmentation details
-- `[Timer]` - Operation timing measurements
-
-**To disable debug logging** (reduce log volume in production):
-```bash
-gcloud run services update alignment-service \
-  --region=us-west1 \
-  --set-env-vars="LOG_LEVEL=INFO"
-```
-
-Or remove `--set-env-vars=LOG_LEVEL=DEBUG` from `.github/workflows/deploy.yml`.
+Cloud Functions include comprehensive debug logging for troubleshooting transcription and alignment.
 
 ### Cloud Functions (Firebase)
 
@@ -255,6 +245,10 @@ Debug logs are always written. To view them:
 - `[Transcribe]` - File processing, timing, status updates
 - `[Gemini]` - API calls, response parsing
 - `[Transform]` - Data model transformation
+- `[Alignment]` - Alignment request preparation, timing
+- `[WhisperX]` - Replicate API calls, word timestamps
+- `[HARDY]` - Alignment algorithm, anchor detection, region alignment
+- `[Anchors]` - Anchor point matching, skip statistics
 
 ### Frontend (Browser Console)
 

@@ -45,16 +45,18 @@ function compensateDrift(segments, audioDuration) {
 
 This leverages the existing drift detection code but applies it more aggressively.
 
-### Phase 2: WhisperX via Replicate API
-**Status**: ✅ Complete
-**Effort**: 14-21 hours
+### Phase 2: WhisperX via Replicate API (Integrated into Firebase Functions)
+**Status**: ✅ Complete (Consolidated)
+**Effort**: 14-21 hours initial, then consolidated into Functions
 **Accuracy Target**: <1 second (~50ms with forced alignment)
 
-Architecture:
+Architecture (Current - Consolidated):
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  React Client   │────▶│  FastAPI Backend │────▶│  Replicate API  │
-│  (Gemini API)   │◀────│  (Cloud Run)     │◀────│  (WhisperX)     │
+│  React Client   │────▶│ Firebase Cloud   │────▶│  Replicate API  │
+│                 │◀────│ Functions        │◀────│  (WhisperX)     │
+│                 │     │ (transcribeAudio)│     │                 │
+│                 │     │  └─alignment.ts  │     │                 │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
 ```
 
@@ -63,24 +65,26 @@ Architecture:
 - WhisperX adds **forced alignment** with wav2vec2 phoneme model
 - Forced alignment matches audio waveforms to phonemes = ~50ms accuracy
 
-**Implementation:**
-1. **alignment-service/** - FastAPI backend on Cloud Run (no GPU needed)
-   - `main.py` - API endpoints (/align, /health)
-   - `aligner.py` - Replicate API + fuzzy matching logic
-   - `Dockerfile` - Python 3.11 container
-   - `cloudbuild.yaml` - CI/CD config
+**Implementation (Consolidated):**
+1. **functions/src/alignment.ts** - HARDY algorithm in TypeScript
+   - Complete port from Python `aligner.py`
+   - Uses `fuzzball` npm package for fuzzy matching
+   - Uses `replicate` npm package for WhisperX API calls
+   - Called directly by `transcribe.ts` (no HTTP overhead)
 
-2. **Frontend integration:**
-   - `services/alignmentService.ts` - API client
-   - "Improve Timestamps" button in ViewerHeader
-   - Status indicators: idle → aligning → aligned/error
+2. **Server-side processing:**
+   - Alignment runs automatically during transcription
+   - No client-side "Improve Timestamps" button needed
+   - Status stored in Firestore: `alignmentStatus: 'aligned'` or `'fallback'`
 
-3. **Alignment Algorithm:**
-   - Call Replicate WhisperX to get word-level timestamps
-   - Fuzzy-match each Gemini segment to word sequence
-   - Use first/last matched word timestamps as segment boundaries
+3. **HARDY Alignment Algorithm (4 levels):**
+   - **Level 1**: Anchor Point Identification (high-confidence matches)
+   - **Level 2**: Region Segmentation (divide transcript at anchors)
+   - **Level 3**: Regional Alignment (DTW-style matching per region)
+   - **Level 4**: Validation & Fallback (quality gates, graceful degradation)
 
 **Cost:** ~$0.02 per 10-minute audio file
+**Latency:** Eliminated HTTP overhead by running in-process
 
 ### Phase 3: Manual Offset Control (Optional)
 **Status**: ✅ Complete
@@ -140,80 +144,64 @@ Rationale:
 - No user-reported sync issues
 - Processing time under 30 seconds for 2-hour files
 
-## Phase 2 Deployment Instructions
+## Deployment Instructions (Consolidated Architecture)
 
 ### Prerequisites
-1. Google Cloud account with Cloud Run enabled
+1. Firebase project with Cloud Functions enabled
 2. Replicate account with API token
 
-### Deploy Alignment Service
+### One-Time Setup: Set REPLICATE_API_TOKEN Secret
 
 ```bash
-# 1. Set your project ID
-export PROJECT_ID=your-project-id
+# Set the Replicate API token as a Firebase secret
+npx firebase functions:secrets:set REPLICATE_API_TOKEN
+# Enter your token when prompted (get from https://replicate.com/account/api-tokens)
 
-# 2. Build and push Docker image
-cd alignment-service
-gcloud builds submit --tag gcr.io/$PROJECT_ID/alignment-service
-
-# 3. Deploy to Cloud Run
-gcloud run deploy alignment-service \
-  --image gcr.io/$PROJECT_ID/alignment-service \
-  --platform managed \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-env-vars "REPLICATE_API_TOKEN=your-token-here"
-
-# 4. Get the service URL
-gcloud run services describe alignment-service --region us-central1 --format='value(status.url)'
+# Verify the secret was created
+npx firebase functions:secrets:access REPLICATE_API_TOKEN
 ```
 
-### Configure Frontend
+### Deployment (Automated via CI/CD)
 
-Add to `.env`:
-```
-ALIGNMENT_SERVICE_URL=https://alignment-service-xxxxx.run.app
-```
+Alignment is now part of Firebase Functions and deploys automatically:
 
-### Run Locally with Docker
+1. **On merge to main**: GitHub Actions runs `deploy-firebase-functions` job
+2. **Job steps**:
+   - `npm ci` - Install dependencies (including `fuzzball`, `replicate`)
+   - `npm run build` - Compile TypeScript
+   - `firebase deploy --only functions` - Deploy to Firebase
 
-The easiest way to run the full stack locally:
+No separate alignment service deployment needed.
+
+### Manual Deployment
 
 ```bash
-# 1. Setup environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# 2. Start all services
-docker compose up
-
-# Frontend: http://localhost:3000
-# Alignment: http://localhost:8080
+# Build and deploy functions
+cd functions && npm install && npm run build && cd ..
+npx firebase deploy --only functions
 ```
 
-### Run Alignment Service Standalone
+### Local Development
 
 ```bash
-# Option A: With Docker
-docker compose up alignment-service
+# Start frontend dev server
+npm run dev
 
-# Option B: With Python directly
-cd alignment-service
-pip install -r requirements.txt
-REPLICATE_API_TOKEN=your-token python main.py
-
-# Service runs on http://localhost:8080
+# Functions run in Firebase emulator (optional)
+npx firebase emulators:start --only functions
 ```
 
-### Test Alignment Service
+### Verify Deployment
 
 ```bash
-# Health check
-curl http://localhost:8080/health
-# Expected: {"status":"ok","replicate_configured":true}
-```
+# Check function logs after uploading an audio file
+npx firebase functions:log --only transcribeAudio
 
-See [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md) for detailed development setup.
+# Look for:
+# [Alignment] Preparing request...
+# [WhisperX] ✅ Transcription complete
+# [HARDY] ✅ Alignment complete, avg_confidence=X.XXX
+```
 
 ## References
 

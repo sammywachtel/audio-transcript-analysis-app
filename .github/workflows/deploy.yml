@@ -1,15 +1,16 @@
 # =============================================================================
-# GitHub Actions Workflow: Deploy to Cloud Run
+# GitHub Actions Workflow: Deploy Application
 # Triggers on push to main branch (after PR merge)
 # Uses Workload Identity Federation for secure, keyless authentication
 #
 # Pipeline Architecture:
-#   - Parallel deployment: frontend and alignment-service build/deploy simultaneously
-#   - Caching: Docker layer cache via GCR, no cross-job dependencies
-#   - Critical path: ~3-4 minutes (limited by slowest service build)
+#   - Parallel deployment: Frontend (Cloud Run) + Firebase Functions
+#   - Frontend: Docker build via Cloud Build, deploy to Cloud Run
+#   - Functions: npm build, deploy via Firebase CLI
+#   - Critical path: ~3-4 minutes (limited by slowest deployment)
 # =============================================================================
 
-name: Deploy to Cloud Run
+name: Deploy Application
 
 on:
   push:
@@ -25,7 +26,6 @@ concurrency:
 env:
   REGION: us-west1
   FRONTEND_SERVICE: audio-transcript-app
-  BACKEND_SERVICE: alignment-service
 
 jobs:
   deploy-frontend:
@@ -77,7 +77,7 @@ jobs:
         run: |
           gcloud builds submit \
             --config=cloudbuild.yaml \
-            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }},_TAG=${{ github.sha }},_VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }},_VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }},_VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }},_VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }},_VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }},_VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }},_VITE_ALIGNMENT_SERVICE_URL=${{ secrets.ALIGNMENT_SERVICE_URL }}" \
+            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.FRONTEND_SERVICE }},_TAG=${{ github.sha }},_VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }},_VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }},_VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }},_VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }},_VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }},_VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" \
             --quiet
 
       # -----------------------------------------------------------------------
@@ -127,8 +127,8 @@ jobs:
     outputs:
       frontend_url: ${{ steps.deploy.outputs.url }}
 
-  deploy-alignment-service:
-    name: Deploy Alignment Service
+  deploy-firebase-functions:
+    name: Deploy Firebase Functions
     runs-on: ubuntu-latest
 
     # Required for Workload Identity Federation
@@ -145,7 +145,7 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Authenticate to Google Cloud using Workload Identity Federation
-      # No service account keys needed - secure and recommended approach
+      # Firebase CLI uses GCP credentials for deployment
       # -----------------------------------------------------------------------
       - name: Authenticate to Google Cloud
         id: auth
@@ -155,90 +155,39 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       # -----------------------------------------------------------------------
-      # Set up Cloud SDK
+      # Set up Node.js for Firebase Functions
       # -----------------------------------------------------------------------
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
 
       # -----------------------------------------------------------------------
-      # Configure Docker for GCR
+      # Install dependencies and build functions
       # -----------------------------------------------------------------------
-      - name: Configure Docker for Google Container Registry
-        run: gcloud auth configure-docker --quiet
+      - name: Install functions dependencies
+        run: cd functions && npm ci
+
+      - name: Build functions
+        run: cd functions && npm run build
 
       # -----------------------------------------------------------------------
-      # Build alignment-service container image using Cloud Build
-      # Uses alignment-service/cloudbuild.yaml
+      # Deploy Firebase Functions
+      # Uses GOOGLE_APPLICATION_CREDENTIALS from auth step
+      # REPLICATE_API_TOKEN must be pre-configured as a Firebase secret
       # -----------------------------------------------------------------------
-      - name: Build alignment-service container image
+      - name: Deploy to Firebase Functions
+        run: npx firebase deploy --only functions --project ${{ secrets.GCP_PROJECT_ID }}
+
+      # -----------------------------------------------------------------------
+      # Verify deployment
+      # -----------------------------------------------------------------------
+      - name: Verify functions deployment
         run: |
-          gcloud builds submit \
-            --config=alignment-service/cloudbuild.yaml \
-            --substitutions="_IMAGE_NAME=gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.BACKEND_SERVICE }},_TAG=${{ github.sha }}" \
-            alignment-service/ \
-            --quiet
-
-      # -----------------------------------------------------------------------
-      # Deploy alignment-service to Cloud Run
-      # Higher memory (512Mi) and timeout (300s) for AI processing workloads
-      # -----------------------------------------------------------------------
-      - name: Deploy alignment-service to Cloud Run
-        id: deploy
-        uses: google-github-actions/deploy-cloudrun@v2
-        with:
-          service: ${{ env.BACKEND_SERVICE }}
-          region: ${{ env.REGION }}
-          image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.BACKEND_SERVICE }}:${{ github.sha }}
-          secrets: |  # pragma: allowlist secret
-            REPLICATE_API_TOKEN=REPLICATE_API_TOKEN:latest
-          flags: |
-            --allow-unauthenticated
-            --memory=512Mi
-            --cpu=1
-            --timeout=300s
-            --min-instances=0
-            --max-instances=10
-            --port=8080
-            --set-env-vars=LOG_LEVEL=DEBUG
-
-      # -----------------------------------------------------------------------
-      # Output deployment URL
-      # -----------------------------------------------------------------------
-      - name: Show alignment-service deployment URL
-        run: |
-          echo "🚀 Alignment service deployment successful!"
-          echo "Alignment Service URL: ${{ steps.deploy.outputs.url }}"
-
-      # -----------------------------------------------------------------------
-      # Alignment service health check
-      # -----------------------------------------------------------------------
-      - name: Alignment service health check
-        run: |
-          echo "Running alignment service health check..."
-          for i in {1..5}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.deploy.outputs.url }}/health" || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Alignment service health check passed!"
-
-              # Also verify Replicate API token is configured
-              RESPONSE=$(curl -s "${{ steps.deploy.outputs.url }}/health")
-              REPLICATE_CONFIGURED=$(echo "$RESPONSE" | grep -o '"replicate_configured":[^,}]*' | cut -d':' -f2)
-
-              if [ "$REPLICATE_CONFIGURED" = "true" ]; then
-                echo "✅ Replicate API token is configured"
-              else
-                echo "⚠️  Warning: Replicate API token may not be configured"
-              fi
-
-              exit 0
-            fi
-            echo "Attempt $i: Status $STATUS, retrying in 10s..."
-            sleep 10
-          done
-          echo "❌ Alignment service health check failed after 5 attempts"
-          exit 1
-
-    outputs:
-      backend_url: ${{ steps.deploy.outputs.url }}
+          echo "🚀 Firebase Functions deployment successful!"
+          echo "Functions deployed to project: ${{ secrets.GCP_PROJECT_ID }}"
+          echo ""
+          echo "Note: REPLICATE_API_TOKEN must be set as a Firebase secret:"
+          echo "  npx firebase functions:secrets:set REPLICATE_API_TOKEN"

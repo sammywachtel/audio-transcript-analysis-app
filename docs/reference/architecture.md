@@ -41,17 +41,23 @@ Technical architecture of the Audio Transcript Analysis App.
 │  │  ┌────────────────────┐    ┌────────────────────────┐     │   │
 │  │  │  transcribeAudio   │    │    getAudioUrl         │     │   │
 │  │  │  (Storage trigger) │    │    (HTTPS callable)    │     │   │
-│  │  └─────────┬──────────┘    └────────────────────────┘     │   │
+│  │  │                    │    └────────────────────────┘     │   │
+│  │  │  ┌──────────────┐  │                                   │   │
+│  │  │  │  alignment   │  │  ← HARDY algorithm (internal)     │   │
+│  │  │  │  module      │  │                                   │   │
+│  │  │  └──────────────┘  │                                   │   │
+│  │  └─────────┬──────────┘                                   │   │
 │  │            │                                              │   │
 │  └────────────┼──────────────────────────────────────────────┘   │
 │               │                                                  │
 └───────────────┼──────────────────────────────────────────────────┘
                 │
-                ▼
-┌──────────────────────────┐
-│      Gemini API          │
-│   (Google AI Studio)     │
-└──────────────────────────┘
+        ┌───────┴───────┐
+        ▼               ▼
+┌──────────────┐  ┌──────────────┐
+│  Gemini API  │  │ Replicate    │
+│  (Google AI) │  │ (WhisperX)   │
+└──────────────┘  └──────────────┘
 ```
 
 ## Component Architecture
@@ -113,7 +119,8 @@ audio-transcript-analysis-app/
 ├── functions/              # Cloud Functions (Node.js)
 │   └── src/
 │       ├── index.ts        # Function exports
-│       └── transcribe.ts   # Gemini transcription
+│       ├── transcribe.ts   # Gemini transcription + orchestration
+│       └── alignment.ts    # HARDY timestamp alignment algorithm
 ├── types.ts                # TypeScript types
 ├── utils.ts                # Helper functions
 └── firebase-config.ts      # Firebase initialization
@@ -147,27 +154,35 @@ audio-transcript-analysis-app/
    onSnapshot → setConversations()
 ```
 
-### Alignment Service Integration
+### Alignment Module (HARDY Algorithm)
 
-The Cloud Function calls an external WhisperX alignment service for precise timestamps:
+The Cloud Function includes an integrated alignment module that provides precise timestamps using WhisperX via Replicate:
 
 ```
 Cloud Function (transcribeAudio)
         │
-        │ Gemini API (initial transcription)
+        │ 1. Gemini API (transcription + speaker diarization)
         ▼
 ┌──────────────────────────────┐
 │  Segments with approximate   │
 │  timestamps from Gemini      │
 └──────────────┬───────────────┘
                │
+               │ 2. alignment.ts (HARDY algorithm)
                ▼
 ┌──────────────────────────────┐
-│  WhisperX Alignment Service  │
-│  (Cloud Run / Replicate)     │
-│                              │
-│  POST /align                 │
-│  { audio_base64, segments }  │
+│  Replicate WhisperX API      │
+│  (word-level timestamps)     │
+└──────────────┬───────────────┘
+               │
+               │ 3. Fuzzy matching + anchor-based alignment
+               ▼
+┌──────────────────────────────┐
+│  HARDY 4-Level Alignment     │
+│  ├─ Level 1: Anchor Points   │
+│  ├─ Level 2: Region Segment  │
+│  ├─ Level 3: Regional Align  │
+│  └─ Level 4: Validation      │
 └──────────────┬───────────────┘
                │
        ┌───────┴───────┐
@@ -176,11 +191,15 @@ Cloud Function (transcribeAudio)
   Success           Failure
   alignmentStatus:  alignmentStatus:
   'aligned'         'fallback'
-  (accurate         (uses Gemini
-  timestamps)       timestamps,
-                    alignmentError
-                    set)
+  (~50ms accuracy)  (uses Gemini
+                    timestamps)
 ```
+
+**Key Components:**
+- `functions/src/alignment.ts` - HARDY algorithm implementation
+- Uses `fuzzball` for fuzzy string matching
+- Uses `replicate` SDK for WhisperX API calls
+- `REPLICATE_API_TOKEN` stored as Firebase secret
 
 **Fallback Behavior:**
 - If WhisperX times out or fails, the Cloud Function uses Gemini's original timestamps
@@ -303,9 +322,19 @@ Behavior:
                     ▼                         ▼
            ┌──────────────┐          ┌──────────────┐
            │  Cloud Run   │          │   Firebase   │
-           │  (Frontend)  │          │  (Backend)   │
+           │  (Frontend)  │          │  Functions   │
+           │              │          │  + Rules     │
            └──────────────┘          └──────────────┘
+                                            │
+                                     ┌──────┴──────┐
+                                     ▼             ▼
+                              ┌──────────┐  ┌──────────┐
+                              │ Gemini   │  │Replicate │
+                              │ API      │  │WhisperX  │
+                              └──────────┘  └──────────┘
 ```
+
+**Parallel Deployment:** Frontend and Firebase Functions deploy simultaneously on merge to main.
 
 ## Google Cloud Infrastructure
 
@@ -321,7 +350,7 @@ The application requires the following Google Cloud APIs:
 | `run.googleapis.com` | Cloud Run | Functions v2 runtime (functions run as containers) |
 | `eventarc.googleapis.com` | Eventarc | Route Storage events to Cloud Functions |
 | `pubsub.googleapis.com` | Pub/Sub | Event message delivery (used by Eventarc) |
-| `secretmanager.googleapis.com` | Secret Manager | Secure storage for GEMINI_API_KEY |
+| `secretmanager.googleapis.com` | Secret Manager | Secure storage for GEMINI_API_KEY and REPLICATE_API_TOKEN |
 | `firestore.googleapis.com` | Firestore | NoSQL database |
 | `storage.googleapis.com` | Cloud Storage | Audio file storage |
 | `iamcredentials.googleapis.com` | IAM Credentials | Workload Identity for CI/CD |
@@ -364,20 +393,23 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
                                  ▼
                         ┌──────────────────┐
                         │  Secret Manager  │
-                        │  (GEMINI_API_KEY)│
+                        │  GEMINI_API_KEY  │
+                        │  REPLICATE_TOKEN │
                         └────────┬─────────┘
                                  │
-                                 ▼
+                        ┌────────┴────────┐
+                        ▼                 ▼
+                ┌──────────────┐  ┌──────────────┐
+                │  Gemini API  │  │  Replicate   │
+                │ (transcript) │  │  (WhisperX)  │
+                └──────┬───────┘  └──────┬───────┘
+                       │                 │
+                       └────────┬────────┘
+                                │
+                                ▼
                         ┌──────────────────┐
-                        │  Gemini API      │
-                        │  (transcription) │
-                        └────────┬─────────┘
-                                 │
-                                 ▼
-                        ┌──────────────────┐
-                        │  Alignment       │
-                        │  Service         │
-                        │  (WhisperX)      │
+                        │  alignment.ts    │
+                        │  (HARDY match)   │
                         └────────┬─────────┘
                                  │
                                  ▼
@@ -434,7 +466,8 @@ These are automatically created and managed by Google Cloud:
 │                    PROJECT@appspot.gserviceaccount.com            │
 │                         (Runtime SA)                              │
 ├───────────────────────────────────────────────────────────────────┤
-│  roles/secretmanager.secretAccessor → read GEMINI_API_KEY         │
+│  roles/secretmanager.secretAccessor → read GEMINI_API_KEY,        │
+│                                         REPLICATE_API_TOKEN       │
 │  (auto-granted by Firebase during deployment)                     │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -442,28 +475,33 @@ These are automatically created and managed by Google Cloud:
 ### CI/CD Pipeline Flow
 
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────────────────┐
-│   GitHub     │    │   GitHub     │    │    Google Cloud          │
-│   Push/PR    │───▶│   Actions    │───▶│                          │
-└──────────────┘    └──────┬───────┘    │  ┌────────────────────┐  │
-                           │            │  │ google-github-     │  │
-                           │            │  │ actions/auth@v2    │  │
-                           │            │  │ (sets up ADC)      │  │
-                           │            │  └─────────┬──────────┘  │
-                           │            │            │             │
-                           │            │            ▼             │
-                           │            │  ┌────────────────────┐  │
-                           │            │  │ Firebase CLI       │  │
-                           │            │  │ firebase deploy    │  │
-                           │            │  └─────────┬──────────┘  │
-                           │            │            │             │
-                           │            │   ┌───────┴───────┐     │
-                           │            │   ▼               ▼     │
-                           │            │ Rules          Functions │
-                           │            │ (Firestore,    (Cloud    │
-                           │            │  Storage)       Run)     │
-                           │            └──────────────────────────┘
+┌──────────────┐    ┌──────────────┐
+│   GitHub     │    │   GitHub     │
+│   Push/PR    │───▶│   Actions    │
+└──────────────┘    └──────┬───────┘
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+              ▼                         ▼
+┌─────────────────────────┐  ┌─────────────────────────┐
+│   deploy-frontend       │  │ deploy-firebase-        │
+│                         │  │ functions               │
+│  Cloud Build → GCR      │  │                         │
+│  → Cloud Run deploy     │  │  npm ci → npm build     │
+│  → Health check         │  │  → firebase deploy      │
+│                         │  │    --only functions     │
+└─────────────────────────┘  └─────────────────────────┘
+        │                            │
+        ▼                            ▼
+┌─────────────────────────┐  ┌─────────────────────────┐
+│  Cloud Run (Frontend)   │  │  Firebase Functions     │
+│  - React SPA            │  │  - transcribeAudio      │
+│  - Static assets        │  │  - alignment.ts         │
+└─────────────────────────┘  │  - getAudioUrl          │
+                             └─────────────────────────┘
 ```
+
+**Parallel Execution:** Both jobs run simultaneously (~3-4 min total).
 
 ## Related Documentation
 

@@ -16,10 +16,11 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
+import { alignTimestamps } from './alignment';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
-const alignmentServiceUrl = defineSecret('ALIGNMENT_SERVICE_URL');
+const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 
 // Types matching the client-side schema
 interface AIResponse {
@@ -78,30 +79,13 @@ interface Person {
   userNotes?: string;
 }
 
-// Alignment service types
-interface AlignmentRequest {
-  audio_base64: string;
-  segments: { speakerId: string; text: string; startMs: number; endMs: number }[];
-}
-
-interface AlignmentResponse {
-  segments: { speakerId: string; text: string; startMs: number; endMs: number; confidence: number }[];
-  average_confidence: number;
-}
-
-interface AlignmentResult {
-  segments: Segment[];
-  alignmentStatus: 'aligned' | 'fallback';
-  alignmentError?: string;
-}
-
 /**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [geminiApiKey, alignmentServiceUrl],
+    secrets: [geminiApiKey, replicateApiToken],
     memory: '1GiB', // Audio processing needs more memory
     timeoutSeconds: 540, // 9 minutes (max for 1st gen functions)
     region: 'us-central1'
@@ -235,27 +219,20 @@ export const transcribeAudio = onObjectFinalized(
         durationFormatted: `${Math.floor(processedData.durationMs / 60000)}:${((processedData.durationMs % 60000) / 1000).toFixed(1)}`
       });
 
-      // Call alignment service to get accurate timestamps from WhisperX
-      // Calculate time remaining for alignment (540s total timeout)
-      const elapsedMs = Date.now() - downloadStartTime;
-      const alignmentTimeoutMs = Math.max(60000, (540 * 1000) - elapsedMs - 30000); // Leave 30s buffer
-
+      // Call alignment to get accurate timestamps from WhisperX
       // Update progress: aligning timestamps
       await progressManager.setStep(ProcessingStep.ALIGNING);
 
-      console.log('[Transcribe] Calling alignment service...', {
+      console.log('[Transcribe] Calling alignment...', {
         conversationId,
-        elapsedMs,
-        alignmentTimeoutMs,
         segmentCount: processedData.segments.length
       });
 
       const alignmentStartTime = Date.now();
-      const alignmentResult = await callAlignmentService(
+      const alignmentResult = await alignTimestamps(
         audioBuffer,
         processedData.segments,
-        alignmentTimeoutMs,
-        alignmentServiceUrl.value()
+        replicateApiToken.value()
       );
       const alignmentDurationMs = Date.now() - alignmentStartTime;
 
@@ -266,8 +243,12 @@ export const transcribeAudio = onObjectFinalized(
         alignmentDurationMs
       });
 
-      // Use aligned segments if successful, otherwise keep Gemini segments
-      const finalSegments = alignmentResult.segments;
+      // Map aligned segments back to our Segment format
+      const finalSegments: Segment[] = processedData.segments.map((seg, idx) => ({
+        ...seg,
+        startMs: alignmentResult.segments[idx]?.startMs ?? seg.startMs,
+        endMs: alignmentResult.segments[idx]?.endMs ?? seg.endMs
+      }));
       const lastSegment = finalSegments[finalSegments.length - 1];
       const finalDurationMs = lastSegment ? lastSegment.endMs : processedData.durationMs;
 
@@ -636,116 +617,4 @@ function transformAIResponse(
     people,
     durationMs
   };
-}
-
-/**
- * Call the alignment service to get accurate timestamps from WhisperX
- * Falls back to original Gemini segments if alignment fails
- */
-async function callAlignmentService(
-  audioBuffer: Buffer,
-  segments: Segment[],
-  timeoutMs: number,
-  serviceUrl: string
-): Promise<AlignmentResult> {
-  // If no service URL configured, skip alignment
-  if (!serviceUrl || serviceUrl.trim() === '') {
-    console.warn('[Alignment] No ALIGNMENT_SERVICE_URL configured, skipping alignment');
-    return {
-      segments,
-      alignmentStatus: 'fallback',
-      alignmentError: 'Alignment service not configured'
-    };
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    console.debug('[Alignment] Preparing request...', {
-      serviceUrl,
-      segmentCount: segments.length,
-      audioSizeBytes: audioBuffer.length,
-      timeoutMs
-    });
-
-    const requestBody: AlignmentRequest = {
-      audio_base64: audioBuffer.toString('base64'),
-      segments: segments.map(s => ({
-        speakerId: s.speakerId,
-        text: s.text,
-        startMs: s.startMs,
-        endMs: s.endMs
-      }))
-    };
-
-    console.debug('[Alignment] Sending request to service...');
-    const response = await fetch(`${serviceUrl}/align`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[Alignment] Service returned error:', {
-        status: response.status,
-        statusText: response.statusText,
-        errorText: errorText.substring(0, 500)
-      });
-      throw new Error(`Alignment service error: ${response.status} ${response.statusText}`);
-    }
-
-    const result: AlignmentResponse = await response.json();
-
-    console.log('[Alignment] ✅ Alignment successful:', {
-      averageConfidence: result.average_confidence,
-      segmentCount: result.segments.length
-    });
-
-    // Quality gate: warn on low confidence but still use alignment
-    // (Gemini timestamps are often worse than low-confidence alignment)
-    // TODO: Stage 2 should implement per-segment confidence thresholds
-    if (result.average_confidence < 0.55) {
-      console.warn('[Alignment] ⚠️ Low confidence alignment (still using it):', {
-        averageConfidence: result.average_confidence
-      });
-    }
-
-    // Map aligned segments back to our Segment format
-    const alignedSegments: Segment[] = segments.map((seg, idx) => ({
-      ...seg,
-      startMs: result.segments[idx]?.startMs ?? seg.startMs,
-      endMs: result.segments[idx]?.endMs ?? seg.endMs
-    }));
-
-    return {
-      segments: alignedSegments,
-      alignmentStatus: 'aligned'
-    };
-
-  } catch (error) {
-    clearTimeout(timeoutId);
-
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const isTimeout = error instanceof Error && error.name === 'AbortError';
-
-    console.error('[Alignment] ❌ Alignment failed:', {
-      errorType: isTimeout ? 'TIMEOUT' : 'ERROR',
-      errorMessage,
-      usingFallback: true
-    });
-
-    // Return original segments with fallback status
-    return {
-      segments,
-      alignmentStatus: 'fallback',
-      alignmentError: isTimeout
-        ? `Alignment timed out after ${timeoutMs}ms`
-        : errorMessage
-    };
-  }
 }

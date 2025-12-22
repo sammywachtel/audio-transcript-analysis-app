@@ -26,7 +26,7 @@ Technical descriptions and specifications.
 - **[Data Model](reference/data-model.md)** - Firestore schema and TypeScript types
 - **[Alignment Algorithm](reference/alignment-algorithm.md)** - HARDY timestamp alignment algorithm
 - **[Alignment Architecture](reference/alignment-architecture.md)** - Timestamp alignment design decisions
-- **[Alignment CI/CD](reference/alignment-cicd.md)** - Alignment service deployment pipeline
+- **[CI/CD Pipeline](reference/alignment-cicd.md)** - Deployment pipeline for Functions
 
 ### [Explanation](explanation/) - Understanding-oriented
 Background and context for design decisions.
@@ -51,7 +51,7 @@ See [conversation-transcript-context-prd.md](conversation-transcript-context-prd
 
 - **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
 - **Backend**: Firebase (Firestore, Storage, Cloud Functions)
-- **AI**: Google Gemini 2.5 Flash (server-side via Cloud Functions)
+- **AI**: Google Gemini 2.5 Flash (transcription) + WhisperX via Replicate (timestamp alignment)
 - **Auth**: Firebase Authentication (Google Sign-In)
-- **Deployment**: Cloud Run (frontend), Firebase (backend services)
-- **CI/CD**: GitHub Actions
+- **Deployment**: Cloud Run (frontend), Firebase Functions (backend)
+- **CI/CD**: GitHub Actions (parallel frontend + functions deployment)

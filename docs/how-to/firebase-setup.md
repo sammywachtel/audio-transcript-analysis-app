@@ -203,11 +203,11 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=123456789012
 VITE_FIREBASE_APP_ID=1:123456789012:web:abc123
 ```
 
-## Step 8: Set Gemini API Secret
+## Step 8: Set API Secrets
 
-> **Important**: This step MUST be completed before CI/CD deployments will work. The secret must exist before GitHub Actions can deploy functions that use it.
+> **Important**: These secrets MUST be set before CI/CD deployments will work. The secrets must exist before GitHub Actions can deploy functions that use them.
 
-The Gemini API key is stored securely in Firebase Secrets (not in client code):
+API keys are stored securely in Firebase Secrets (not in client code):
 
 ```bash
 # Login to Firebase
@@ -216,15 +216,21 @@ npx firebase login
 # Set the project
 npx firebase use your-project-id
 
-# Set the secret (you'll be prompted to enter the key)
+# Set the Gemini API key (for transcription)
 npx firebase functions:secrets:set GEMINI_API_KEY
+
+# Set the Replicate API token (for WhisperX timestamp alignment)
+npx firebase functions:secrets:set REPLICATE_API_TOKEN
 ```
 
-Get a Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey).
+**Get API keys from:**
+- Gemini API key: [Google AI Studio](https://makersuite.google.com/app/apikey)
+- Replicate API token: [Replicate Account](https://replicate.com/account/api-tokens)
 
-**Verify the secret was created:**
+**Verify the secrets were created:**
 ```bash
 npx firebase functions:secrets:access GEMINI_API_KEY
+npx firebase functions:secrets:access REPLICATE_API_TOKEN
 ```
 
 ## Step 9: Deploy Security Rules
