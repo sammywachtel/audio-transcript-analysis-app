@@ -606,8 +606,28 @@ async function identifySpeakerCorrections(
 
   const speakerList = speakers.map(s => `${s.id} (${s.name})`).join(', ');
 
+  // Calculate speaker distribution to help Gemini understand the imbalance
+  const speakerCounts: Record<string, number> = {};
+  segments.forEach(seg => {
+    speakerCounts[seg.speakerId] = (speakerCounts[seg.speakerId] || 0) + 1;
+  });
+  const speakerDistribution = Object.entries(speakerCounts)
+    .map(([id, count]) => `${id}: ${count} segments (${Math.round(count / segments.length * 100)}%)`)
+    .join(', ');
+
+  // Check if distribution is severely imbalanced (>80% one speaker)
+  const maxCount = Math.max(...Object.values(speakerCounts));
+  const isImbalanced = maxCount / segments.length > 0.8;
+
   const prompt = `
 You are an expert at identifying speaker attribution errors in conversation transcripts.
+
+CURRENT SPEAKER DISTRIBUTION: ${speakerDistribution}
+${isImbalanced ? `
+⚠️ WARNING: This distribution is SEVERELY IMBALANCED. In a natural two-person conversation,
+speakers typically have more balanced turn-taking. This imbalance suggests the diarization
+system missed many speaker changes. Be MORE AGGRESSIVE in identifying corrections.
+` : ''}
 
 Analyze this transcript and identify segments where the speaker attribution is LIKELY WRONG.
 Focus on:
@@ -618,20 +638,30 @@ Focus on:
    - Back-and-forth acknowledgments: "Right, exactly. Mm-hmm. So anyway..." (likely different speakers)
    - Name mentions: "Chris mentioned..." or "Michael, what do you think?" (indicates another speaker)
    - Direct address: "You know what I mean?" followed by "Yeah" (likely different speakers)
+   - Interjections: "um yeah", "so how do you", "oh really" mid-sentence often indicate listener feedback
 
 2. MISATTRIBUTED SEGMENTS: Entire segments where speaker is clearly wrong.
    Common patterns:
+   - Short acknowledgments ("yeah", "mm-hmm", "right", "exactly") during someone else's extended speech
+   - Questions immediately followed by answers in the same segment
    - Context clues (person A asks question, answer attributed to person A instead of person B)
-   - Filler words from wrong speaker ("yeah", "mm-hmm", "right" during someone else's turn)
-   - Self-references that don't match ("I work at Google" but speaker is introduced as working at Meta)
+   - Self-references that don't match the speaker's known role/identity
 
-IMPORTANT GUIDELINES:
-- Only return HIGH-CONFIDENCE corrections (80%+ sure)
-- For split actions, identify the character position where speaker changes
-- For reassign actions, identify which speaker ID should be used instead
+${isImbalanced ? `
+3. REBALANCING: Given the severe imbalance, look for patterns where the minority speaker
+   is likely responding or interjecting but their speech was merged with the dominant speaker's segments.
+   Focus especially on:
+   - Segments > 50 words (more likely to contain multiple speakers)
+   - Segments with multiple sentences (each sentence could be a different speaker)
+   - Acknowledgment words appearing anywhere in the text
+` : ''}
+
+GUIDELINES:
+- For split actions, provide: splitAtChar (character position) and speakerAfter (new speaker for second part)
+- For reassign actions, provide: newSpeaker (correct speaker ID)
 - The speakerId values available are: ${speakerList}
-- Be conservative - false negatives are better than false positives
-- Don't suggest corrections based on speculation - need clear conversational evidence
+- ${isImbalanced ? 'Given the imbalance, aim to find 5-20 corrections. Be thorough.' : 'Be conservative - false negatives are better than false positives.'}
+- Base corrections on clear conversational evidence
 
 Actions:
 - "split": Segment contains multiple speakers, should be split at character position
@@ -643,13 +673,15 @@ Transcript (with speaker labels and segment indices):
 ${formattedTranscript}
 
 Return your analysis as JSON with an array of corrections.
-If no corrections are needed, return an empty array.
+${isImbalanced ? 'Given the imbalance, you should find multiple corrections. Look carefully.' : 'If no corrections are needed, return an empty array.'}
 `;
 
-  console.debug('[Speaker Correction] Sending request...', {
+  console.log('[Speaker Correction] Analyzing transcript...', {
     promptLength: prompt.length,
     segmentCount: segments.length,
-    speakerCount: speakers.length
+    speakerCount: speakers.length,
+    speakerDistribution,
+    isImbalanced
   });
 
   const result = await model.generateContent([{ text: prompt }]);
@@ -736,10 +768,15 @@ function applySpeakerCorrections(
 
     } else if (correction.action === 'split') {
       // Split segment at character position
-      if (!correction.splitAtChar || !correction.speakerBefore || !correction.speakerAfter) {
-        console.warn('[Apply Corrections] Split action missing required fields, skipping:', correction);
+      // speakerBefore is optional - defaults to original segment's speaker
+      // speakerAfter is required - it's the new speaker for the second part
+      if (!correction.splitAtChar || !correction.speakerAfter) {
+        console.warn('[Apply Corrections] Split action missing required fields (need splitAtChar and speakerAfter), skipping:', correction);
         return;
       }
+
+      // Default speakerBefore to original speaker if not provided
+      const speakerBefore = correction.speakerBefore || segment.speakerId;
 
       const splitPos = correction.splitAtChar;
       if (splitPos <= 0 || splitPos >= segment.text.length) {
@@ -762,7 +799,7 @@ function applySpeakerCorrections(
         segmentIndex: segIndex,
         splitAtChar: splitPos,
         charRatio: charRatio.toFixed(2),
-        speakerBefore: correction.speakerBefore,
+        speakerBefore: speakerBefore,
         speakerAfter: correction.speakerAfter,
         reason: correction.reason,
         beforeLength: textBefore.length,
@@ -774,7 +811,7 @@ function applySpeakerCorrections(
         text: textBefore,
         startMs: segment.startMs,
         endMs: splitTimeMs,
-        speakerId: correction.speakerBefore,
+        speakerId: speakerBefore,
         index: segment.index  // Will be re-indexed later
       };
 
