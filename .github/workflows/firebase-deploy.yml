@@ -96,13 +96,33 @@ jobs:
 
       # Set Firebase Function Secrets (only when deploying functions)
       # Note: Using printf instead of echo to avoid trailing newlines in secrets
+      # Only sets secrets that are non-empty to avoid "Secret Payload cannot be empty" errors
       - name: Set Firebase Function Secrets
         if: github.event.inputs.deploy_target != 'rules-only'
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REPLICATE_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}
         run: |  # pragma: allowlist secret
           echo "Setting Firebase Function secrets..."
-          printf '%s' "${{ secrets.GEMINI_API_KEY }}" | firebase functions:secrets:set GEMINI_API_KEY --force
-          printf '%s' "${{ secrets.REPLICATE_API_TOKEN }}" | firebase functions:secrets:set REPLICATE_API_TOKEN --force
-          printf '%s' "${{ secrets.HUGGINGFACE_ACCESS_TOKEN }}" | firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --force
+          if [ -n "$GEMINI_KEY" ]; then
+            printf '%s' "$GEMINI_KEY" | firebase functions:secrets:set GEMINI_API_KEY --force
+            echo "  ✓ GEMINI_API_KEY set"
+          else
+            echo "  ⚠ GEMINI_API_KEY not configured in GitHub secrets"
+          fi
+          if [ -n "$REPLICATE_TOKEN" ]; then
+            printf '%s' "$REPLICATE_TOKEN" | firebase functions:secrets:set REPLICATE_API_TOKEN --force
+            echo "  ✓ REPLICATE_API_TOKEN set"
+          else
+            echo "  ⚠ REPLICATE_API_TOKEN not configured in GitHub secrets"
+          fi
+          if [ -n "$HF_TOKEN" ]; then
+            printf '%s' "$HF_TOKEN" | firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN --force
+            echo "  ✓ HUGGINGFACE_ACCESS_TOKEN set"
+          else
+            echo "  ⚠ HUGGINGFACE_ACCESS_TOKEN not configured in GitHub secrets (speaker diarization may be disabled)"
+          fi
           echo "✅ Firebase secrets configured"
 
       # Deploy based on target
