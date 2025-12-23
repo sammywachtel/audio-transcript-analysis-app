@@ -45,12 +45,14 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 4. Enables all required APIs (including Generative Language API for Gemini)
 5. Configures IAM bindings (deployment SA, runtime SA)
 6. Initializes Firestore database
-7. Configures Storage bucket permissions (if bucket exists)
-8. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
-9. Creates GitHub Actions service account with Cloud Run permissions
-10. Optionally creates service account key for Firebase CI/CD (interactive prompt)
-11. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
-12. Optionally registers Firebase Web App (interactive prompt)
+7. Detects Firebase Storage bucket (provides setup instructions if not found)
+8. Configures Storage bucket permissions for Eventarc triggers (if bucket exists)
+9. Configures CORS for audio file access (if bucket exists)
+10. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
+11. Creates GitHub Actions service account with Cloud Run permissions
+12. Optionally creates service account key for Firebase CI/CD (interactive prompt)
+13. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
+14. Optionally registers Firebase Web App (interactive prompt)
 
 > **Note:** The Gemini API key is created within your GCP project (not via AI Studio), keeping all resources in one place. Service agent IAM bindings are configured automatically by the GitHub Actions workflow on each deployment.
 
@@ -181,6 +183,8 @@ Common domains to add:
 4. Click **Enable**
 
 ## Step 5: Enable Cloud Storage
+
+> **Note:** Storage must be enabled via Firebase Console (requires location selection). After enabling, run `gcp-setup.sh` again to configure bucket permissions and CORS automatically.
 
 1. Firebase Console → **Storage** → **Get started**
 2. Select **Start in production mode**

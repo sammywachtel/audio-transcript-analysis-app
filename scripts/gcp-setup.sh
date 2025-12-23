@@ -395,27 +395,104 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 10: Initialize Storage and Configure Bucket Access
+# Step 10: Initialize Firebase Storage and Configure Bucket Access
 # -----------------------------------------------------------------------------
 
-log_step "Configuring Storage bucket..."
+log_step "Initializing Firebase Storage..."
 
 # Firebase Storage bucket (might be .appspot.com or .firebasestorage.app)
 BUCKET_APPSPOT="gs://${PROJECT_ID}.appspot.com"
 BUCKET_FIREBASE="gs://${PROJECT_ID}.firebasestorage.app"
+STORAGE_REGION="${REGION:-us-central1}"
 
 EVENTARC_SA="service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com"
 
-# Try the firebasestorage.app bucket first (newer projects)
+# Check if bucket already exists
 if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
     BUCKET="$BUCKET_FIREBASE"
-    log_info "Using bucket: $BUCKET"
+    log_skip "Storage bucket exists: $BUCKET"
 elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
     BUCKET="$BUCKET_APPSPOT"
-    log_info "Using bucket: $BUCKET"
+    log_skip "Storage bucket exists: $BUCKET"
 else
-    log_info "Storage bucket not yet created - will be created on first upload"
+    # Storage not initialized - try multiple creation methods
+    log_info "Firebase Storage not found, attempting to create..."
     BUCKET=""
+
+    # Method 1: Create bucket directly via gsutil and configure for Firebase
+    # Firebase Storage uses Cloud Storage buckets with the .firebasestorage.app suffix
+    if [[ -z "$BUCKET" ]]; then
+        log_info "Trying: gsutil mb (direct bucket creation)..."
+        if gsutil mb -p "$PROJECT_ID" -l "$STORAGE_REGION" -b on "$BUCKET_FIREBASE" 2>/dev/null; then
+            BUCKET="$BUCKET_FIREBASE"
+            log_success "Created storage bucket: $BUCKET"
+        fi
+    fi
+
+    # Method 2: Try the older appspot.com bucket format
+    if [[ -z "$BUCKET" ]]; then
+        log_info "Trying: gsutil mb (appspot.com format)..."
+        if gsutil mb -p "$PROJECT_ID" -l "$STORAGE_REGION" -b on "$BUCKET_APPSPOT" 2>/dev/null; then
+            BUCKET="$BUCKET_APPSPOT"
+            log_success "Created storage bucket: $BUCKET"
+        fi
+    fi
+
+    # Method 3: Use Firebase CLI to initialize storage interactively with defaults
+    if [[ -z "$BUCKET" ]]; then
+        log_info "Trying: firebase init storage..."
+        # Create a temp firebase.json if needed, pipe 'Y' for defaults
+        if echo -e "Y\n" | firebase init storage --project="$PROJECT_ID" 2>/dev/null; then
+            # Check if bucket was created
+            if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
+                BUCKET="$BUCKET_FIREBASE"
+                log_success "Created storage bucket via Firebase CLI: $BUCKET"
+            elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
+                BUCKET="$BUCKET_APPSPOT"
+                log_success "Created storage bucket via Firebase CLI: $BUCKET"
+            fi
+        fi
+    fi
+
+    # Method 4: REST API approach using Firebase Management API
+    if [[ -z "$BUCKET" ]]; then
+        log_info "Trying: Firebase Management API..."
+        ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null)
+        if [[ -n "$ACCESS_TOKEN" ]]; then
+            # Try to get/create default bucket via Storage API
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST \
+                "https://firebasestorage.googleapis.com/v1beta/projects/${PROJECT_ID}/buckets" \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"name\": \"${PROJECT_ID}.firebasestorage.app\", \"location\": \"${STORAGE_REGION}\"}" \
+                2>/dev/null)
+
+            if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "409" ]]; then
+                # 200 = created, 409 = already exists
+                if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
+                    BUCKET="$BUCKET_FIREBASE"
+                    log_success "Created storage bucket via API: $BUCKET"
+                fi
+            fi
+        fi
+    fi
+
+    # All methods failed - provide manual instructions
+    if [[ -z "$BUCKET" ]]; then
+        log_info ""
+        log_info "Automated Firebase Storage setup was not successful."
+        log_info "This typically happens on new projects that need initial console setup."
+        log_info ""
+        log_info "Please enable Firebase Storage manually:"
+        log_info "  1. Go to: https://console.firebase.google.com/project/$PROJECT_ID/storage"
+        log_info "  2. Click 'Get started'"
+        log_info "  3. Select 'Start in production mode'"
+        log_info "  4. Choose location: $STORAGE_REGION"
+        log_info "  5. Click 'Done'"
+        log_info ""
+        log_info "Then re-run this script to configure bucket permissions and CORS."
+    fi
 fi
 
 if [[ -n "$BUCKET" ]]; then
@@ -430,6 +507,18 @@ if [[ -n "$BUCKET" ]]; then
         else
             log_info "Eventarc agent bucket access - skipped (will be configured on first deploy)"
         fi
+    fi
+
+    # Configure CORS for audio file access
+    CORS_FILE="$(dirname "$0")/../cors.json"
+    if [[ -f "$CORS_FILE" ]]; then
+        if gsutil cors set "$CORS_FILE" "$BUCKET" 2>/dev/null; then
+            log_success "Configured CORS for Storage bucket"
+        else
+            log_info "CORS configuration skipped - apply manually with: gsutil cors set cors.json $BUCKET"
+        fi
+    else
+        log_info "cors.json not found - CORS configuration skipped"
     fi
 fi
 
