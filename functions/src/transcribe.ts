@@ -222,6 +222,10 @@ export const transcribeAudio = onObjectFinalized(
 
       const whisperxSegments = buildSegmentsFromWhisperX(whisperxResult.segments);
 
+      // Step 2.5: Fix segment boundaries (diarization often splits a few words late)
+      console.debug('[Transcribe] Step 2.5: Fixing segment boundaries...');
+      whisperxSegments.segments = fixSegmentBoundaries(whisperxSegments.segments);
+
       const buildDurationMs = Date.now() - buildStartTime;
       console.debug('[Transcribe] Segments built:', {
         buildDurationMs,
@@ -253,35 +257,27 @@ export const transcribeAudio = onObjectFinalized(
         personCount: analysis.people?.length ?? 0
       });
 
-      // Step 3.5: Speaker correction pass (NEW)
-      console.log('[Transcribe] Step 3.5: Identifying speaker corrections...');
-      const speakerCorrectionStartTime = Date.now();
+      // Step 3.5: Speaker correction pass - TEMPORARILY DISABLED
+      // Disabled to isolate whether this was causing timestamp clustering issues
+      // TODO: Re-enable after confirming new model works correctly
+      console.log('[Transcribe] Step 3.5: Speaker corrections DISABLED for debugging');
+      const speakerCorrections: SpeakerCorrection[] = [];
+      const speakerCorrectionDurationMs = 0;
 
-      const speakerCorrections = await identifySpeakerCorrections(
-        whisperxSegments.segments,
-        whisperxSegments.speakers,
-        geminiApiKey.value()
-      );
-
-      const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
-      console.log('[Transcribe] Speaker correction analysis complete:', {
-        conversationId,
-        durationMs: speakerCorrectionDurationMs,
-        durationSec: (speakerCorrectionDurationMs / 1000).toFixed(1),
-        correctionCount: speakerCorrections.length,
-        splitCount: speakerCorrections.filter(c => c.action === 'split').length,
-        reassignCount: speakerCorrections.filter(c => c.action === 'reassign').length
-      });
-
-      // Apply speaker corrections to segments
-      const correctedSegments = applySpeakerCorrections(
-        whisperxSegments.segments,
-        speakerCorrections,
-        whisperxSegments.speakers.map(s => s.id)
-      );
-
-      // Update the whisperxSegments with corrected segments
-      whisperxSegments.segments = correctedSegments;
+      // Original code preserved for re-enablement:
+      // const speakerCorrectionStartTime = Date.now();
+      // const speakerCorrections = await identifySpeakerCorrections(
+      //   whisperxSegments.segments,
+      //   whisperxSegments.speakers,
+      //   geminiApiKey.value()
+      // );
+      // speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
+      // const correctedSegments = applySpeakerCorrections(
+      //   whisperxSegments.segments,
+      //   speakerCorrections,
+      //   whisperxSegments.speakers.map(s => s.id)
+      // );
+      // whisperxSegments.segments = correctedSegments;
 
       // Update progress: finalizing
       await progressManager.setStep(ProcessingStep.FINALIZING);
@@ -410,6 +406,106 @@ function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
   });
 
   return { segments, speakers };
+}
+
+/**
+ * Fix segment boundaries where diarization split too late.
+ *
+ * Common issue: speaker change detected a few words late, so the end of
+ * one speaker's sentence gets attached to the start of the next speaker's segment.
+ *
+ * Example: "all these other things. Anyways. But having tools..."
+ *          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ should be in previous segment
+ *
+ * Heuristic: If a segment starts with a sentence fragment (text ending in
+ * sentence-ending punctuation within first N chars), move it to prev segment.
+ */
+function fixSegmentBoundaries(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>
+): Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }> {
+  if (segments.length < 2) {
+    return segments;
+  }
+
+  const MAX_FRAGMENT_CHARS = 80;  // Only look for fragments in first 80 chars
+  const MIN_REMAINING_CHARS = 20; // Don't move if it leaves segment too short
+
+  // Regex to find sentence-ending punctuation followed by space and more text
+  // Matches: "text here. More text" or "question? Answer" or "wow! Response"
+  const fragmentPattern = /^(.+?[.!?])\s+([A-Z].*)/s;
+
+  let movedCount = 0;
+  const result = [...segments];
+
+  for (let i = 1; i < result.length; i++) {
+    const current = result[i];
+    const previous = result[i - 1];
+
+    // Only fix boundaries between DIFFERENT speakers
+    if (current.speakerId === previous.speakerId) {
+      continue;
+    }
+
+    const text = current.text.trim();
+
+    // Check if segment starts with a fragment (sentence ending within first N chars)
+    const match = text.match(fragmentPattern);
+    if (!match) {
+      continue;
+    }
+
+    const fragment = match[1];  // The part to move (e.g., "all these other things. Anyways.")
+    const remainder = match[2]; // The part to keep (e.g., "But having tools...")
+
+    // Only move if fragment is reasonably short and remainder is long enough
+    if (fragment.length > MAX_FRAGMENT_CHARS || remainder.length < MIN_REMAINING_CHARS) {
+      continue;
+    }
+
+    // Additional check: fragment should look like a continuation, not a complete thought
+    // Skip if fragment starts with common sentence starters
+    const startsWithSentenceStarter = /^(I|You|We|They|He|She|It|The|A|An|This|That|So|But|And|Or|If|When|What|How|Why|Where|Who)\s/i.test(fragment);
+    if (startsWithSentenceStarter && fragment.length > 40) {
+      // Longer fragments starting with sentence starters are probably intentional
+      continue;
+    }
+
+    console.debug(`[FixBoundaries] Moving fragment from segment ${i} to ${i-1}:`, {
+      fragment: fragment.substring(0, 50) + (fragment.length > 50 ? '...' : ''),
+      fromSpeaker: current.speakerId,
+      toSpeaker: previous.speakerId
+    });
+
+    // Calculate new timestamps (interpolate based on character ratio)
+    const totalChars = current.text.length;
+    const fragmentRatio = fragment.length / totalChars;
+    const durationMs = current.endMs - current.startMs;
+    const fragmentDurationMs = Math.floor(durationMs * fragmentRatio);
+    const newBoundaryMs = current.startMs + fragmentDurationMs;
+
+    // Update previous segment: append fragment and extend end time
+    result[i - 1] = {
+      ...previous,
+      text: previous.text.trimEnd() + ' ' + fragment,
+      endMs: newBoundaryMs
+    };
+
+    // Update current segment: remove fragment and adjust start time
+    result[i] = {
+      ...current,
+      text: remainder,
+      startMs: newBoundaryMs
+    };
+
+    movedCount++;
+  }
+
+  if (movedCount > 0) {
+    console.log(`[FixBoundaries] Moved ${movedCount} sentence fragments to previous segments`);
+  }
+
+  // Re-index segments
+  return result.map((seg, idx) => ({ ...seg, index: idx }));
 }
 
 /**
@@ -561,8 +657,11 @@ Return your analysis as JSON matching the provided schema.
 /**
  * NEW: Identify speaker corrections using Gemini conversational analysis.
  * Detects mid-segment speaker changes that WhisperX/pyannote miss.
+ *
+ * TEMPORARILY DISABLED - kept for future re-enablement after debugging
+ * @see Step 3.5 in transcribeAudio
  */
-async function identifySpeakerCorrections(
+export async function _identifySpeakerCorrections(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   speakers: Array<{ id: string; name: string }>,
   apiKey: string
@@ -714,8 +813,11 @@ ${isImbalanced ? 'Given the imbalance, you should find multiple corrections. Loo
 /**
  * Apply speaker corrections to segments.
  * Handles both 'split' and 'reassign' actions.
+ *
+ * TEMPORARILY DISABLED - kept for future re-enablement after debugging
+ * @see Step 3.5 in transcribeAudio
  */
-function applySpeakerCorrections(
+export function _applySpeakerCorrections(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   corrections: SpeakerCorrection[],
   allSpeakers: string[]

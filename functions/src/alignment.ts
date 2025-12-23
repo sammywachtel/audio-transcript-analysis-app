@@ -15,8 +15,9 @@
 import Replicate from 'replicate';
 import fuzz from 'fuzzball';
 
-// WhisperX model on Replicate - provides word-level timestamps via forced alignment
-const WHISPERX_MODEL = 'victor-upmeet/whisperx:84d2ad2d6194fe98a17d2b60bef1c7f910c46b2f6fd38996ca457afd9c8abfcb';
+// Whisper diarization model on Replicate - provides word-level timestamps + speaker diarization
+// Using rafaelgalle/whisper-diarization-advanced: stable, recently updated, good for multi-speaker audio
+const WHISPERX_MODEL = 'rafaelgalle/whisper-diarization-advanced:56dcb55b658e0cb096d663aca0c44bac1466f3acf4304f8ff35af555dc43c9c9';
 
 // =============================================================================
 // Configuration
@@ -1281,17 +1282,14 @@ async function getWhisperxTimestamps(
     `base64_length=${audioBase64.length}`
   );
 
-  // Use data URI - more reliable than file handles in Docker containers
-  const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
-
   console.debug(
     `[WhisperX] Request parameters: ` +
     `model=${WHISPERX_MODEL.substring(0, 50)}..., ` +
-    `align_output=True, batch_size=16, language=en`
+    `language=en`
   );
 
   try {
-    // Call WhisperX via Replicate
+    // Call whisper-diarization-advanced via Replicate
     const client = new Replicate({ auth: replicateToken });
 
     const startTime = Date.now();
@@ -1299,9 +1297,7 @@ async function getWhisperxTimestamps(
       WHISPERX_MODEL as `${string}/${string}:${string}`,
       {
         input: {
-          audio_file: audioDataUri,
-          align_output: true,
-          batch_size: 16,
+          file_string: audioBase64,  // Base64 encoded audio (not data URI)
           language: 'en'
         }
       }
@@ -1499,29 +1495,21 @@ export async function transcribeWithWhisperX(
       `audio_size=${audioSizeMb.toFixed(2)}MB`
     );
 
-    // Use data URI for audio
-    const audioDataUri = `data:audio/mpeg;base64,${audioBase64}`;
-
-    // Call WhisperX via Replicate
+    // Call whisper-diarization-advanced via Replicate
     const Replicate = (await import('replicate')).default;
     const client = new Replicate({ auth: replicateToken });
 
-    // Build input params - diarization requires HF token (pyannote.audio is gated)
+    // Build input params - rafaelgalle/whisper-diarization-advanced has built-in diarization
     const inputParams: Record<string, unknown> = {
-      audio_file: audioDataUri,
-      align_output: true,
-      batch_size: 16,
+      file_string: audioBase64,  // Base64 encoded audio (not data URI)
       language: 'en'
     };
 
-    // Only enable diarization if we have a HF token
+    // Note: huggingfaceToken is no longer needed - diarization is built-in
     if (huggingfaceToken) {
-      inputParams.diarization = true;
-      inputParams.huggingface_access_token = huggingfaceToken;
-      console.log('[WhisperX] Speaker diarization enabled (HF token provided)');
-    } else {
-      console.warn('[WhisperX] Speaker diarization DISABLED - no huggingface_access_token provided');
+      console.log('[WhisperX] Note: HF token provided but not needed - diarization is built-in');
     }
+    console.log('[WhisperX] Speaker diarization enabled (built-in)');
 
     const startTime = Date.now();
     const output = await client.run(
