@@ -137,6 +137,21 @@ add_service_agent_binding() {
     fi
 }
 
+# Create a service identity to ensure the service agent exists (idempotent-ish)
+ensure_service_identity() {
+    local service="$1"
+    local description="$2"
+
+    if gcloud services identity create \
+        --service="$service" \
+        --project="$PROJECT_ID" \
+        --quiet > /dev/null 2>&1; then
+        log_success "$description"
+    else
+        log_info "$description - skipped (may already exist or insufficient perms)"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Preflight Checks
 # -----------------------------------------------------------------------------
@@ -373,6 +388,16 @@ log_step "Configuring Google-managed service agents..."
 log_info "Note: Service agents are created when you first use each service."
 log_info "Skipped bindings will be configured automatically on first deployment."
 
+# Force-create service identities so bindings don't race first deploys
+log_info "Ensuring service identities exist..."
+ensure_service_identity "eventarc.googleapis.com" "Eventarc service identity"
+ensure_service_identity "pubsub.googleapis.com" "Pub/Sub service identity"
+ensure_service_identity "storage.googleapis.com" "Storage service identity"
+
+# Eventarc service agent → Eventarc Service Agent role (required for triggers)
+EVENTARC_SA="service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com"
+add_service_agent_binding "$EVENTARC_SA" "roles/eventarc.serviceAgent" "Eventarc Agent → Eventarc Service Agent"
+
 # Storage service agent → Pub/Sub publisher (for Cloud Functions storage triggers)
 STORAGE_SA="service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
 add_service_agent_binding "$STORAGE_SA" "roles/pubsub.publisher" "Storage Agent → Pub/Sub Publisher"
@@ -486,7 +511,22 @@ if [[ -n "$BUCKET" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Step 11: Set Up Workload Identity Federation for Cloud Run (GitHub Actions)
+# Step 11: Configure Functions Artifact Cleanup Policy
+# -----------------------------------------------------------------------------
+
+log_step "Configuring Functions artifact cleanup policy..."
+
+# Avoid Firebase deploy warnings and keep Artifact Registry tidy
+if firebase --project "$PROJECT_ID" functions:artifacts:setpolicy \
+    --location "$REGION" \
+    --force > /dev/null 2>&1; then
+    log_success "Functions artifact cleanup policy set for $REGION"
+else
+    log_info "Functions artifact cleanup policy - skipped (check Firebase auth/permissions)"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 12: Set Up Workload Identity Federation for Cloud Run (GitHub Actions)
 # -----------------------------------------------------------------------------
 
 log_step "Workload Identity Federation for Cloud Run..."
@@ -589,7 +629,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 12: Create Service Account Key for Firebase Deployment
+# Step 13: Create Service Account Key for Firebase Deployment
 # -----------------------------------------------------------------------------
 
 log_step "Service account key for Firebase CI/CD..."
@@ -616,7 +656,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 13: Create Gemini API Key and Secret
+# Step 14: Create Gemini API Key and Secret
 # -----------------------------------------------------------------------------
 
 log_step "Gemini API key and secret..."
@@ -685,7 +725,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 14: Enable Firebase Authentication
+# Step 15: Enable Firebase Authentication
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Authentication..."
@@ -693,9 +733,19 @@ log_step "Firebase Authentication..."
 log_info "Google Sign-In must be enabled manually:"
 log_info "https://console.firebase.google.com/project/$PROJECT_ID/authentication/providers"
 log_info "Enable Google provider and set support email"
+log_info ""
+log_info "After Google Sign-In is enabled, add these domains to Firebase Auth authorized domains:"
+log_info "  • ${PROJECT_ID}.firebaseapp.com (Firebase adds it automatically)"
+log_info "  • Cloud Run URL (obtain after deploying the frontend):"
+log_info "      gcloud run services describe audio-transcript-app \\"
+log_info "        --project=$PROJECT_ID --region=$REGION --format=\"value(status.url)\""
+log_info "    Copy the host (e.g., audio-transcript-app‑xxxx-uc.a.run.app) and add it as an authorized domain."
+log_info "  • Any custom domains you map to Cloud Run (e.g., ata.wachtel.us) once the domain mapping exists."
+log_info "    Use Firebase Console → Authentication → Settings → Authorized domains → Add domain."
+log_info ""
 
 # -----------------------------------------------------------------------------
-# Step 15: Register Web App
+# Step 16: Register Web App
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Web App..."
@@ -745,10 +795,11 @@ echo ""
 fi
 echo "  Next Steps:"
 echo "    1. Enable Google Auth: https://console.firebase.google.com/project/$PROJECT_ID/authentication/providers"
-echo "    2. Get web config:     firebase apps:sdkconfig WEB --project=$PROJECT_ID"
-echo "    3. Update .env with Firebase config values (GCP_PROJECT_ID = $PROJECT_ID)"
-echo "    4. Configure GitHub Secrets (see below)"
-echo "    5. Deploy:             firebase deploy --project=$PROJECT_ID"
+echo "    2. Add Firebase Auth authorized domains: ${PROJECT_ID}.firebaseapp.com, your Cloud Run URL, and any custom domains (e.g., ata.wachtel.us) once mapped."
+echo "    3. Get web config:     firebase apps:sdkconfig WEB --project=$PROJECT_ID"
+echo "    4. Update .env with Firebase config values (GCP_PROJECT_ID = $PROJECT_ID)"
+echo "    5. Configure GitHub Secrets (see below)"
+echo "    6. Deploy:             firebase deploy --project=$PROJECT_ID"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
 echo "  │  Required GitHub Secrets for CI/CD (Single Project)                     │"

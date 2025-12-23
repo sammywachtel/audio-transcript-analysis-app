@@ -58,17 +58,21 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 
 **After running the script:**
 1. Enable Google Auth manually (link provided in output)
-2. Get Firebase web config: `firebase apps:sdkconfig WEB --project=PROJECT_ID`
-3. Update `.env` with Firebase config values
-4. Add service account key to GitHub Secrets: `FIREBASE_SERVICE_ACCOUNT` <!-- pragma: allowlist secret -->
-5. Add Firebase config to GitHub Secrets (for Cloud Run builds):
+2. Add Firebase Auth authorized domains:
+   - `${PROJECT_ID}.firebaseapp.com` (Firebase adds it automatically)
+   - The Cloud Run service URL you deploy (use `gcloud run services describe audio-transcript-app --project=$PROJECT_ID --region=$REGION --format="value(status.url)"` to grab the hostname for the authorized domain)
+   - Any custom domains you map to Cloud Run (e.g., `ata.wachtel.us`) after the domain mapping is created
+   Add domains under Firebase Console → Authentication → Settings → Authorized domains.
+3. Get Firebase web config: `firebase apps:sdkconfig WEB --project=PROJECT_ID`
+4. Update `.env` with Firebase config values
+5. Add service account key to GitHub Secrets: `FIREBASE_SERVICE_ACCOUNT` <!-- pragma: allowlist secret -->
+6. Add Firebase config to GitHub Secrets (for Cloud Run builds):
    - `VITE_FIREBASE_API_KEY`
    - `VITE_FIREBASE_AUTH_DOMAIN`
    - `VITE_FIREBASE_PROJECT_ID`
    - `VITE_FIREBASE_STORAGE_BUCKET`
    - `VITE_FIREBASE_MESSAGING_SENDER_ID`
    - `VITE_FIREBASE_APP_ID`
-6. After first Cloud Run deployment, add the Cloud Run domain to Firebase Auth authorized domains
 
 ---
 
@@ -174,6 +178,20 @@ Common domains to add:
 - `your-project.firebaseapp.com` (enabled by default)
 - `your-cloud-run-service-xxxxx-uw.a.run.app` (must add manually)
 - Custom domain if you have one
+### Custom Domains (ata.wachtel.us, etc.)
+If you map a custom domain such as `ata.wachtel.us` to Cloud Run, add it to the authorized domains list as soon as the mapping is active.
+
+1. Map the domain to Cloud Run:
+   ```bash
+   gcloud run domain-mappings create ata.wachtel.us \
+     --service=audio-transcript-app \
+     --project=$PROJECT_ID \
+     --region=$REGION
+   ```
+2. Verify the mapping (Console or `gcloud run domain-mappings describe ata.wachtel.us ...`).
+3. Add `ata.wachtel.us` (or the custom hostname you configured) under Firebase Console → Authentication → Settings → Authorized domains.
+
+> Tip: The setup script prints the Cloud Run URL and authorized domains reminder in its final summary, so rerun it if you forget these steps.
 
 ## Step 4: Create Firestore Database
 

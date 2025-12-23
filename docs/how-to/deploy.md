@@ -458,6 +458,7 @@ Firebase Auth only allows sign-in from pre-approved domains. After deploying to 
 2. **Authentication** → **Settings** → **Authorized domains**
 3. Click **Add domain**
 4. Add your Cloud Run domain (e.g., `audio-transcript-app-xxxxx-uw.a.run.app`)
+5. Add any custom domains (e.g., `ata.wachtel.us`) once the Cloud Run mapping is complete
 
 > **Tip**: Get your Cloud Run URL with:
 > ```bash
@@ -469,3 +470,17 @@ Firebase Auth only allows sign-in from pre-approved domains. After deploying to 
 >   --region=$REGION \
 >   --format="value(status.url)"
 > ```
+
+### Adding Custom Domains (ata.wachtel.us, etc.)
+
+If you expose `audio-transcript-app` via a custom domain such as `ata.wachtel.us`, map the domain before adding it to Firebase Auth's authorized domains list.
+
+1. Create the domain mapping:
+   ```bash
+   gcloud run domain-mappings create ata.wachtel.us \
+     --service=audio-transcript-app \
+     --project=$PROJECT_ID \
+     --region=$REGION
+   ```
+2. Verify the DNS records are live and the mapping shows as ready in Cloud Run.
+3. After the mapping is active, add `ata.wachtel.us` (or your custom hostname) under Firebase Console → Authentication → Settings → Authorized domains.
