@@ -419,17 +419,34 @@ else
     # Firebase Storage provisioning MUST be done via Firebase Console for new projects.
     # This is a Firebase platform limitation - there is no CLI or API to create the initial bucket.
     BUCKET=""
-    log_info ""
-    log_info "Firebase Storage requires one-time setup via Firebase Console."
-    log_info ""
-    log_info "Please enable Firebase Storage:"
-    log_info "  1. Go to: https://console.firebase.google.com/project/$PROJECT_ID/storage"
-    log_info "  2. Click 'Get started'"
-    log_info "  3. Select 'Start in production mode'"
-    log_info "  4. Choose location: $STORAGE_REGION"
-    log_info "  5. Click 'Done'"
-    log_info ""
-    log_info "After setup, re-run this script to configure bucket permissions and CORS."
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+    echo "║  Firebase Storage requires one-time setup via Firebase Console               ║"
+    echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  Please complete these steps:"
+    echo ""
+    echo "  1. Open: https://console.firebase.google.com/project/$PROJECT_ID/storage"
+    echo "  2. Click 'Get started'"
+    echo "  3. Select 'Start in production mode'"
+    echo "  4. Choose location: $STORAGE_REGION"
+    echo "  5. Click 'Done'"
+    echo ""
+    read -p "  Press ENTER when you've completed the Firebase Storage setup... " </dev/tty
+    echo ""
+
+    # Re-check for bucket after user confirms setup
+    log_info "Checking for Storage bucket..."
+    if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
+        BUCKET="$BUCKET_FIREBASE"
+        log_success "Storage bucket found: $BUCKET"
+    elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
+        BUCKET="$BUCKET_APPSPOT"
+        log_success "Storage bucket found: $BUCKET"
+    else
+        log_error "Storage bucket still not found. Please verify setup completed successfully."
+        log_info "You can re-run this script after confirming Storage is enabled in Firebase Console."
+    fi
 fi
 
 if [[ -n "$BUCKET" ]]; then
