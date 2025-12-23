@@ -2,6 +2,20 @@
 
 Complete guide to setting up Firebase for the Audio Transcript Analysis App.
 
+## Single Project Architecture
+
+This app uses a **single GCP/Firebase project** for all components:
+
+| Component | Service | Purpose |
+|-----------|---------|---------|
+| Frontend | Cloud Run | Static React app (nginx) |
+| Backend | Cloud Functions | Transcription processing |
+| Database | Firestore | Conversation and transcript storage |
+| Files | Firebase Storage | Audio file storage |
+| Auth | Firebase Authentication | Google Sign-In |
+
+Using one project simplifies billing, IAM permissions, and service integration.
+
 ## Quick Start: Automated Setup
 
 For a fresh project setup, use the automated script that handles everything:
@@ -12,11 +26,14 @@ For a fresh project setup, use the automated script that handles everything:
 # Find your billing account ID
 gcloud billing accounts list
 
-# Run the setup script
-./scripts/gcp-setup.sh <project-id> <billing-account-id>
+# Run the setup script (includes Workload Identity for Cloud Run)
+./scripts/gcp-setup.sh <project-id> <billing-account-id> [github-repo]
 
-# Example:
-./scripts/gcp-setup.sh audio-transcript-app-67465 01A2B3-C4D5E6-F7G8H9
+# Example (with GitHub repo for full CI/CD setup):
+./scripts/gcp-setup.sh my-app-12345 01A2B3-C4D5E6-F7G8H9 myorg/my-repo
+
+# Example (without GitHub repo - set up Workload Identity later):
+./scripts/gcp-setup.sh my-app-12345 01A2B3-C4D5E6-F7G8H9
 ```
 
 The script is **idempotent** - safe to rerun if it fails partway through. It will skip steps that are already complete.
@@ -25,12 +42,17 @@ The script is **idempotent** - safe to rerun if it fails partway through. It wil
 1. Creates GCP project (or uses existing)
 2. Links billing account
 3. Adds Firebase to the project
-4. Enables all required APIs
-5. Configures all IAM bindings (deployment SA, runtime SA, service agents)
-6. Initializes Firestore
-7. Configures Storage bucket permissions
-8. Optionally creates service account key for CI/CD
-9. Optionally sets API secrets (GEMINI_API_KEY, REPLICATE_API_TOKEN, HUGGINGFACE_ACCESS_TOKEN)
+4. Enables all required APIs (including Generative Language API for Gemini)
+5. Configures IAM bindings (deployment SA, runtime SA)
+6. Initializes Firestore database
+7. Configures Storage bucket permissions (if bucket exists)
+8. Sets up Workload Identity Federation for GitHub Actions (if `github-repo` provided)
+9. Creates GitHub Actions service account with Cloud Run permissions
+10. Optionally creates service account key for Firebase CI/CD (interactive prompt)
+11. Optionally creates Gemini API key in-project and stores in Secret Manager (interactive prompt)
+12. Optionally registers Firebase Web App (interactive prompt)
+
+> **Note:** The Gemini API key is created within your GCP project (not via AI Studio), keeping all resources in one place. Service agent IAM bindings are configured automatically by the GitHub Actions workflow on each deployment.
 
 **After running the script:**
 1. Enable Google Auth manually (link provided in output)
@@ -89,12 +111,15 @@ Enable each API by clicking the links below:
 | **Eventarc** | Cloud Functions v2 event triggers | [Enable](https://console.cloud.google.com/apis/library/eventarc.googleapis.com) |
 | **Cloud Billing** | Verify project billing status | [Enable](https://console.cloud.google.com/apis/library/cloudbilling.googleapis.com) |
 | **Firebase Extensions** | Firebase deployment features | [Enable](https://console.cloud.google.com/apis/library/firebaseextensions.googleapis.com) |
+| **Generative Language** | Gemini AI for transcription analysis | [Enable](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com) |
+| **API Keys** | Create API keys for Gemini | [Enable](https://console.cloud.google.com/apis/library/apikeys.googleapis.com) |
 
 ### Via CLI
 
 ```bash
 PROJECT_ID="your-project-id"
 
+# Enable all required APIs in a single command
 gcloud services enable \
   cloudfunctions.googleapis.com \
   cloudbuild.googleapis.com \
@@ -106,8 +131,13 @@ gcloud services enable \
   eventarc.googleapis.com \
   cloudbilling.googleapis.com \
   firebaseextensions.googleapis.com \
+  containerregistry.googleapis.com \
+  generativelanguage.googleapis.com \
+  apikeys.googleapis.com \
   --project=$PROJECT_ID
 ```
+
+> **Note**: `generativelanguage.googleapis.com` enables Gemini AI. `apikeys.googleapis.com` allows creating API keys via CLI.
 
 ## Step 3: Enable Authentication
 
@@ -128,7 +158,13 @@ gcloud services enable \
 
 Get your Cloud Run URL:
 ```bash
-gcloud run services describe audio-transcript-app --region=us-west1 --format="value(status.url)"
+PROJECT_ID="your-project-id"
+REGION="us-west1"
+
+gcloud run services describe audio-transcript-app \
+  --project=$PROJECT_ID \
+  --region=$REGION \
+  --format="value(status.url)"
 ```
 
 Common domains to add:
@@ -157,16 +193,17 @@ The app needs to fetch audio files from Firebase Storage for timestamp alignment
 
 **Apply CORS configuration:**
 ```bash
-# From project root (cors.json is already included)
-gsutil cors set cors.json gs://YOUR_PROJECT_ID.firebasestorage.app
+PROJECT_ID="your-project-id"
 
-# Example:
-gsutil cors set cors.json gs://audio-transcript-app-67465.firebasestorage.app
+# From project root (cors.json is already included)
+gsutil cors set cors.json gs://${PROJECT_ID}.firebasestorage.app
 ```
 
 **Verify CORS is configured:**
 ```bash
-gsutil cors get gs://YOUR_PROJECT_ID.firebasestorage.app
+PROJECT_ID="your-project-id"
+
+gsutil cors get gs://${PROJECT_ID}.firebasestorage.app
 ```
 
 The `cors.json` file allows requests from:
@@ -213,11 +250,33 @@ Secrets are **automatically set during deployment** from GitHub Secrets. Add the
 
 | GitHub Secret | Description | Get it from |
 |---------------|-------------|-------------|
-| `GEMINI_API_KEY` | Transcription analysis | [Google AI Studio](https://makersuite.google.com/app/apikey) |
+| `GEMINI_API_KEY` | Transcription analysis | [GCP Credentials](https://console.cloud.google.com/apis/credentials) (same project) |
 | `REPLICATE_API_TOKEN` | WhisperX transcription | [Replicate Account](https://replicate.com/account/api-tokens) |
 | `HUGGINGFACE_ACCESS_TOKEN` | Speaker diarization | [Hugging Face Settings](https://huggingface.co/settings/tokens) |
 
 The deploy workflows automatically sync these to Firebase Secrets before deploying functions.
+
+### Creating the Gemini API Key (In-Project)
+
+Create the Gemini API key within your GCP project to keep everything consolidated:
+
+```bash
+PROJECT_ID="your-project-id"
+
+# Create API key restricted to Generative Language API
+gcloud services api-keys create \
+  --project=$PROJECT_ID \
+  --display-name="gemini-api-key" \
+  --api-target=service=generativelanguage.googleapis.com
+```
+
+Or via Console:
+1. Go to [APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials)
+2. Click **+ CREATE CREDENTIALS** → **API key**
+3. Click **Edit API key** to restrict it to **Generative Language API** only
+4. Copy the key and add to GitHub Secrets as `GEMINI_API_KEY`
+
+> **Note**: The setup script (`gcp-setup.sh`) can create this key automatically if you select "y" when prompted.
 
 ### For Local Development Only
 
@@ -267,18 +326,22 @@ npx firebase functions:secrets:access HUGGINGFACE_ACCESS_TOKEN
 ## Step 9: Deploy Security Rules
 
 ```bash
+PROJECT_ID="your-project-id"
+
 # Deploy Firestore and Storage rules
-npx firebase deploy --only firestore:rules,storage:rules
+npx firebase deploy --only firestore:rules,storage:rules --project=$PROJECT_ID
 ```
 
 ## Step 10: Deploy Cloud Functions
 
 ```bash
+PROJECT_ID="your-project-id"
+
 # Install function dependencies
 cd functions && npm install && cd ..
 
 # Deploy functions
-npx firebase deploy --only functions
+npx firebase deploy --only functions --project=$PROJECT_ID
 ```
 
 ## CI/CD Setup
@@ -308,34 +371,56 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 Via CLI:
 
 ```bash
-SA_EMAIL="firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com"
-PROJECT="your-project-id"
+PROJECT_ID="your-project-id"
+SA_EMAIL="firebase-adminsdk-xxxxx@${PROJECT_ID}.iam.gserviceaccount.com"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+# Grant all required roles
+for ROLE in \
+  roles/firebaserules.admin \
+  roles/cloudfunctions.admin \
+  roles/iam.serviceAccountUser \
+  roles/datastore.user \
+  roles/storage.admin \
+  roles/firebase.admin \
+  roles/secretmanager.admin
+do
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="$ROLE"
+done
+```
+
+Or individually:
+
+```bash
+PROJECT_ID="your-project-id"
+SA_EMAIL="firebase-adminsdk-xxxxx@${PROJECT_ID}.iam.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/firebaserules.admin"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/cloudfunctions.admin"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/iam.serviceAccountUser"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/datastore.user"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/storage.admin"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/firebase.admin"
 
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/secretmanager.admin"
 ```
@@ -346,13 +431,15 @@ gcloud projects add-iam-policy-binding $PROJECT \
 
 The default runtime service account is the **App Engine default service account**:
 ```
-your-project-id@appspot.gserviceaccount.com
+${PROJECT_ID}@appspot.gserviceaccount.com
 ```
 
 Grant secret access to the runtime service account:
 ```bash
-gcloud projects add-iam-policy-binding your-project-id \
-  --member="serviceAccount:your-project-id@appspot.gserviceaccount.com" \
+PROJECT_ID="your-project-id"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_ID}@appspot.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
@@ -360,15 +447,17 @@ gcloud projects add-iam-policy-binding your-project-id \
 
 > **Important**: Cloud Functions v2 with Storage triggers requires Google-managed service agents to have specific roles for the event pipeline (Storage → Pub/Sub → Eventarc → Cloud Run).
 
-Find your project number in [Project Settings](https://console.cloud.google.com/iam-admin/settings) or:
+Get your project number:
 ```bash
-PROJECT_NUMBER=$(gcloud projects describe your-project-id --format="value(projectNumber)")
+PROJECT_ID="your-project-id"
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+echo "Project number: $PROJECT_NUMBER"
 ```
 
 Grant the required roles:
 ```bash
-PROJECT_NUMBER="your-project-number"
 PROJECT_ID="your-project-id"
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
 
 # Storage service agent → can publish to Pub/Sub
 gcloud projects add-iam-policy-binding $PROJECT_ID \
@@ -421,7 +510,8 @@ In your repository: **Settings** → **Secrets and variables** → **Actions**
 
 **Solution**:
 ```bash
-npx firebase deploy --only firestore:rules
+PROJECT_ID="your-project-id"
+npx firebase deploy --only firestore:rules --project=$PROJECT_ID
 ```
 
 ### "Firebase Rules Admin" permission denied in CI/CD
@@ -457,21 +547,27 @@ Then retry the upload. No redeployment needed - the existing HF token will now w
 
 1. **Ensure the secret exists** (run locally):
    ```bash
+   PROJECT_ID="your-project-id"
    npx firebase login
-   npx firebase use your-project-id
+   npx firebase use $PROJECT_ID
    npx firebase functions:secrets:set GEMINI_API_KEY
    ```
 
 2. **Grant Secret Manager Admin to the deployment service account**:
    ```bash
-   gcloud projects add-iam-policy-binding your-project-id \
-     --member="serviceAccount:firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com" \
+   PROJECT_ID="your-project-id"
+   SA_EMAIL="firebase-adminsdk-xxxxx@${PROJECT_ID}.iam.gserviceaccount.com"
+
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+     --member="serviceAccount:$SA_EMAIL" \
      --role="roles/secretmanager.admin"
    ```
 
 3. **Verify the role is assigned**:
    ```bash
-   gcloud projects get-iam-policy your-project-id \
+   PROJECT_ID="your-project-id"
+
+   gcloud projects get-iam-policy $PROJECT_ID \
      --flatten="bindings[].members" \
      --filter="bindings.role:secretmanager" \
      --format="table(bindings.role, bindings.members)"
@@ -484,11 +580,16 @@ Then retry the upload. No redeployment needed - the existing HF token will now w
 After setup, verify everything works:
 
 ```bash
+PROJECT_ID="your-project-id"
+
 # Check Firebase CLI is authenticated
 npx firebase projects:list
 
-# Check the project is selected
-npx firebase use
+# Set and verify the project
+npx firebase use $PROJECT_ID
+
+# Check project is configured correctly
+npx firebase apps:list --project=$PROJECT_ID
 
 # Run locally
 npm run dev

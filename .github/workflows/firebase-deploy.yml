@@ -94,6 +94,52 @@ jobs:
         working-directory: functions
         run: npm run build
 
+      # Configure service agent IAM bindings (required for Cloud Functions v2 with Storage triggers)
+      # These service agents are created lazily, so we configure them on every deploy to ensure they exist
+      - name: Configure Service Agent IAM Bindings
+        if: github.event.inputs.deploy_target != 'rules-only'
+        run: |
+          echo "Configuring service agent IAM bindings..."
+          PROJECT_ID="${{ env.FIREBASE_PROJECT_ID }}"
+          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+
+          # Helper function to add binding if SA exists
+          add_binding_if_exists() {
+            local sa_email="$1"
+            local role="$2"
+            local desc="$3"
+
+            if gcloud iam service-accounts describe "$sa_email" --project="$PROJECT_ID" &>/dev/null; then
+              gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+                --member="serviceAccount:$sa_email" \
+                --role="$role" \
+                --condition=None \
+                --quiet > /dev/null 2>&1 || true
+              echo "  ✓ $desc"
+            else
+              echo "  ⊘ $desc (service agent not yet created)"
+            fi
+          }
+
+          # Runtime service account → Secret accessor
+          RUNTIME_SA="${PROJECT_ID}@appspot.gserviceaccount.com"
+          add_binding_if_exists "$RUNTIME_SA" "roles/secretmanager.secretAccessor" "Runtime SA → Secret Accessor"
+
+          # Storage service agent → Pub/Sub publisher (for storage triggers)
+          STORAGE_SA="service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
+          add_binding_if_exists "$STORAGE_SA" "roles/pubsub.publisher" "Storage Agent → Pub/Sub Publisher"
+
+          # Pub/Sub service agent → Token creator (for authenticated push)
+          PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
+          add_binding_if_exists "$PUBSUB_SA" "roles/iam.serviceAccountTokenCreator" "Pub/Sub Agent → Token Creator"
+
+          # Compute service agent → Cloud Run invoker + event receiver
+          COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+          add_binding_if_exists "$COMPUTE_SA" "roles/run.invoker" "Compute Agent → Run Invoker"
+          add_binding_if_exists "$COMPUTE_SA" "roles/eventarc.eventReceiver" "Compute Agent → Event Receiver"
+
+          echo "✅ Service agent bindings configured"
+
       # Set Firebase Function Secrets (only when deploying functions)
       # Note: Using printf instead of echo to avoid trailing newlines in secrets
       # Only sets secrets that are non-empty to avoid "Secret Payload cannot be empty" errors
