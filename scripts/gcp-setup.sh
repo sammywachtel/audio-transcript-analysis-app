@@ -395,10 +395,10 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 10: Initialize Storage and Configure Bucket Access
+# Step 10: Initialize Firebase Storage and Configure Bucket Access
 # -----------------------------------------------------------------------------
 
-log_step "Configuring Storage bucket..."
+log_step "Initializing Firebase Storage..."
 
 # Firebase Storage bucket (might be .appspot.com or .firebasestorage.app)
 BUCKET_APPSPOT="gs://${PROJECT_ID}.appspot.com"
@@ -409,12 +409,22 @@ EVENTARC_SA="service-${PROJECT_NUMBER}@gcp-sa-eventarc.iam.gserviceaccount.com"
 # Try the firebasestorage.app bucket first (newer projects)
 if gsutil ls "$BUCKET_FIREBASE" &>/dev/null; then
     BUCKET="$BUCKET_FIREBASE"
-    log_info "Using bucket: $BUCKET"
+    log_skip "Storage bucket exists: $BUCKET"
 elif gsutil ls "$BUCKET_APPSPOT" &>/dev/null; then
     BUCKET="$BUCKET_APPSPOT"
-    log_info "Using bucket: $BUCKET"
+    log_skip "Storage bucket exists: $BUCKET"
 else
-    log_info "Storage bucket not yet created - will be created on first upload"
+    # Storage not initialized - must be done via Firebase Console (requires location selection)
+    log_info "Firebase Storage not yet initialized"
+    log_info ""
+    log_info "Please enable Firebase Storage manually:"
+    log_info "  1. Go to: https://console.firebase.google.com/project/$PROJECT_ID/storage"
+    log_info "  2. Click 'Get started'"
+    log_info "  3. Select 'Start in production mode'"
+    log_info "  4. Choose a location (e.g., us-central1)"
+    log_info "  5. Click 'Done'"
+    log_info ""
+    log_info "Then re-run this script to configure bucket permissions and CORS."
     BUCKET=""
 fi
 
@@ -430,6 +440,18 @@ if [[ -n "$BUCKET" ]]; then
         else
             log_info "Eventarc agent bucket access - skipped (will be configured on first deploy)"
         fi
+    fi
+
+    # Configure CORS for audio file access
+    CORS_FILE="$(dirname "$0")/../cors.json"
+    if [[ -f "$CORS_FILE" ]]; then
+        if gsutil cors set "$CORS_FILE" "$BUCKET" 2>/dev/null; then
+            log_success "Configured CORS for Storage bucket"
+        else
+            log_info "CORS configuration skipped - apply manually with: gsutil cors set cors.json $BUCKET"
+        fi
+    else
+        log_info "cors.json not found - CORS configuration skipped"
     fi
 fi
 
