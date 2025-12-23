@@ -34,6 +34,23 @@ cd functions && npm install && cd ..
 
 ## Step 3: Set Up Firebase
 
+**Option A: Automated Setup (Recommended)**
+
+Use the setup script to configure everything in one command:
+
+```bash
+# Find your billing account ID
+gcloud billing accounts list
+
+# Run setup (optionally include GitHub repo for CI/CD)
+./scripts/gcp-setup.sh <project-id> <billing-account-id> [github-org/repo]
+
+# Example:
+./scripts/gcp-setup.sh my-app-12345 01A2B3-C4D5E6-F7G8H9 myorg/my-repo
+```
+
+**Option B: Manual Setup**
+
 Follow the complete [Firebase Setup Guide](../how-to/firebase-setup.md) to:
 
 1. Create a Firebase project
@@ -43,7 +60,7 @@ Follow the complete [Firebase Setup Guide](../how-to/firebase-setup.md) to:
 5. Register your web app
 6. Configure environment variables
 
-**Quick summary:**
+**After setup (both options):**
 
 ```bash
 # Copy environment template
@@ -51,18 +68,29 @@ cp .env.example .env
 
 # Edit .env with your Firebase config
 # (Get values from Firebase Console → Project Settings → Your apps)
+# IMPORTANT: Set GCP_PROJECT_ID to the same value as VITE_FIREBASE_PROJECT_ID
 ```
 
 ## Step 4: Configure Gemini API
 
-1. Get a Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Set it as a Firebase secret:
+If you ran the automated setup script (`gcp-setup.sh`) with "y" when prompted, the Gemini API key was created automatically. Otherwise, create one in your GCP project:
 
 ```bash
+PROJECT_ID="your-project-id"
+
+# Create API key restricted to Gemini
+gcloud services api-keys create \
+  --project=$PROJECT_ID \
+  --display-name="gemini-api-key" \
+  --api-target=service=generativelanguage.googleapis.com
+
+# Store in Firebase secrets
 npx firebase login
-npx firebase use your-project-id
+npx firebase use $PROJECT_ID
 npx firebase functions:secrets:set GEMINI_API_KEY
 ```
+
+Or via Console: [APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials) → **Create Credentials** → **API key**
 
 ## Step 5: Deploy Firebase Backend
 

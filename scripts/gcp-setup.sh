@@ -5,14 +5,22 @@
 # Creates and configures a complete Firebase project with all required APIs,
 # service accounts, and IAM bindings for the Audio Transcript Analysis App.
 #
+# SINGLE PROJECT ARCHITECTURE:
+# This script sets up ONE project for all components:
+#   - Cloud Run (frontend)
+#   - Cloud Functions (backend)
+#   - Firestore (database)
+#   - Firebase Storage (audio files)
+#   - Firebase Authentication
+#
 # This script is IDEMPOTENT - safe to rerun after partial failures.
 # Each step checks existing state and skips if already configured.
 #
 # Usage:
-#   ./scripts/gcp-setup.sh <project-id> <billing-account-id>
+#   ./scripts/gcp-setup.sh <project-id> <billing-account-id> [github-repo]
 #
 # Example:
-#   ./scripts/gcp-setup.sh audio-transcript-app-67465 01A2B3-C4D5E6-F7G8H9
+#   ./scripts/gcp-setup.sh my-app-12345 01A2B3-C4D5E6-F7G8H9 myorg/my-repo
 #
 # To find your billing account ID:
 #   gcloud billing accounts list
@@ -25,9 +33,10 @@ set -euo pipefail
 # Configuration
 # -----------------------------------------------------------------------------
 
-PROJECT_ID="${1:?❌ Usage: $0 <project-id> <billing-account-id>}"
-BILLING_ACCOUNT="${2:?❌ Usage: $0 <project-id> <billing-account-id>}"
-REGION="${3:-us-central1}"
+PROJECT_ID="${1:?❌ Usage: $0 <project-id> <billing-account-id> [github-repo]}"
+BILLING_ACCOUNT="${2:?❌ Usage: $0 <project-id> <billing-account-id> [github-repo]}"
+GITHUB_REPO="${3:-}"  # Optional: org/repo for Workload Identity Federation
+REGION="${4:-us-central1}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -99,16 +108,37 @@ add_iam_binding() {
     fi
 }
 
+# Check if a service account exists
+sa_exists() {
+    local sa_email="$1"
+    gcloud iam service-accounts describe "$sa_email" --project="$PROJECT_ID" &>/dev/null
+}
+
+# Add IAM binding for service agent (skip if SA doesn't exist yet)
+add_service_agent_binding() {
+    local sa_email="$1"
+    local role="$2"
+    local description="$3"
+
+    if ! sa_exists "$sa_email"; then
+        log_info "$description - skipped (service agent not yet created)"
+        return 0
+    fi
+
+    add_iam_binding "serviceAccount:$sa_email" "$role" "$description"
+}
+
 # -----------------------------------------------------------------------------
 # Preflight Checks
 # -----------------------------------------------------------------------------
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  Audio Transcript App - GCP/Firebase Setup${NC}"
+echo -e "${BLUE}  Audio Transcript App - GCP/Firebase Setup (Single Project)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "  Project ID:      $PROJECT_ID"
 echo "  Billing Account: $BILLING_ACCOUNT"
+echo "  GitHub Repo:     ${GITHUB_REPO:-<not specified - skipping Workload Identity>}"
 echo "  Region:          $REGION"
 echo ""
 
@@ -198,21 +228,31 @@ fi
 log_step "Enabling required APIs..."
 
 APIS=(
+    # Firebase services
+    "firebase.googleapis.com"
+    "firestore.googleapis.com"
+    "firebasestorage.googleapis.com"
+    "firebaseextensions.googleapis.com"
+    "identitytoolkit.googleapis.com"
+    # Cloud Functions
     "cloudfunctions.googleapis.com"
-    "cloudbuild.googleapis.com"
-    "artifactregistry.googleapis.com"
-    "run.googleapis.com"
     "eventarc.googleapis.com"
     "pubsub.googleapis.com"
+    # Cloud Run (frontend)
+    "run.googleapis.com"
+    "containerregistry.googleapis.com"
+    # Build & Deploy
+    "cloudbuild.googleapis.com"
+    "artifactregistry.googleapis.com"
+    # IAM & Secrets
     "secretmanager.googleapis.com"
-    "firestore.googleapis.com"
-    "storage.googleapis.com"
     "iamcredentials.googleapis.com"
+    # Storage & Billing
+    "storage.googleapis.com"
     "cloudbilling.googleapis.com"
-    "firebaseextensions.googleapis.com"
-    "firebase.googleapis.com"
-    "firebasestorage.googleapis.com"
-    "identitytoolkit.googleapis.com"
+    # AI/ML - Gemini
+    "generativelanguage.googleapis.com"
+    "apikeys.googleapis.com"
 )
 
 APIS_TO_ENABLE=()
@@ -243,32 +283,46 @@ PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectN
 log_info "Project number: $PROJECT_NUMBER"
 
 # -----------------------------------------------------------------------------
-# Step 6: Configure Firebase Admin SDK Service Account
+# Step 6: Configure Firebase Deployment Service Account
 # -----------------------------------------------------------------------------
 
-log_step "Configuring Firebase Admin SDK service account..."
+log_step "Configuring Firebase deployment service account..."
 
-# Find the firebase-adminsdk service account
+# Try to find existing firebase-adminsdk service account
 SA_EMAIL=$(gcloud iam service-accounts list \
     --filter="email:firebase-adminsdk" \
     --format="value(email)" \
     --project="$PROJECT_ID" | head -1)
 
 if [[ -z "$SA_EMAIL" ]]; then
-    log_info "Waiting for Firebase Admin SDK service account to be created..."
-    sleep 10
-    SA_EMAIL=$(gcloud iam service-accounts list \
-        --filter="email:firebase-adminsdk" \
-        --format="value(email)" \
-        --project="$PROJECT_ID" | head -1)
+    # Firebase Admin SDK SA not found - this is normal for new projects
+    # Create a dedicated deployment service account instead
+    DEPLOY_SA_NAME="firebase-deployer"
+    SA_EMAIL="${DEPLOY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+        log_skip "Deployment service account already exists"
+    else
+        log_info "Creating dedicated deployment service account..."
+        gcloud iam service-accounts create "$DEPLOY_SA_NAME" \
+            --project="$PROJECT_ID" \
+            --display-name="Firebase Deployer (CI/CD)"
+        log_success "Created $SA_EMAIL"
+
+        # Wait for service account to propagate (GCP eventual consistency)
+        log_info "Waiting for service account to propagate..."
+        for i in {1..12}; do
+            if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+                break
+            fi
+            sleep 5
+        done
+    fi
+else
+    log_skip "Using existing Firebase Admin SDK service account"
 fi
 
-if [[ -z "$SA_EMAIL" ]]; then
-    log_error "Firebase Admin SDK service account not found. This should have been created automatically."
-    exit 1
-fi
-
-log_info "Firebase Admin SA: $SA_EMAIL"
+log_info "Deployment SA: $SA_EMAIL"
 
 # Deployment service account roles
 DEPLOYMENT_ROLES=(
@@ -293,13 +347,13 @@ log_step "Configuring runtime service account..."
 
 RUNTIME_SA="${PROJECT_ID}@appspot.gserviceaccount.com"
 
-# Wait for App Engine default SA to exist (created when enabling certain APIs)
-if ! gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" &>/dev/null; then
-    log_info "Waiting for App Engine default service account..."
-    sleep 15
+# Check if App Engine default SA exists (created when enabling certain APIs)
+if ! sa_exists "$RUNTIME_SA"; then
+    log_info "App Engine default SA not yet created - will be created on first function deploy"
+    log_info "Skipping secret accessor binding (will be configured during deployment)"
+else
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/secretmanager.secretAccessor" "$RUNTIME_SA → Secret Accessor"
 fi
-
-add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/secretmanager.secretAccessor" "$RUNTIME_SA → Secret Accessor"
 
 # -----------------------------------------------------------------------------
 # Step 8: Configure Service Agent IAM Bindings
@@ -307,18 +361,21 @@ add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/secretmanager.secretAccessor
 
 log_step "Configuring Google-managed service agents..."
 
-# Storage service agent → Pub/Sub publisher
-STORAGE_SA="service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
-add_iam_binding "serviceAccount:$STORAGE_SA" "roles/pubsub.publisher" "Storage Agent → Pub/Sub Publisher"
+log_info "Note: Service agents are created when you first use each service."
+log_info "Skipped bindings will be configured automatically on first deployment."
 
-# Pub/Sub service agent → Token creator
+# Storage service agent → Pub/Sub publisher (for Cloud Functions storage triggers)
+STORAGE_SA="service-${PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
+add_service_agent_binding "$STORAGE_SA" "roles/pubsub.publisher" "Storage Agent → Pub/Sub Publisher"
+
+# Pub/Sub service agent → Token creator (for authenticated push)
 PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
-add_iam_binding "serviceAccount:$PUBSUB_SA" "roles/iam.serviceAccountTokenCreator" "Pub/Sub Agent → Token Creator"
+add_service_agent_binding "$PUBSUB_SA" "roles/iam.serviceAccountTokenCreator" "Pub/Sub Agent → Token Creator"
 
 # Compute service agent → Cloud Run invoker + event receiver
 COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-add_iam_binding "serviceAccount:$COMPUTE_SA" "roles/run.invoker" "Compute Agent → Run Invoker"
-add_iam_binding "serviceAccount:$COMPUTE_SA" "roles/eventarc.eventReceiver" "Compute Agent → Event Receiver"
+add_service_agent_binding "$COMPUTE_SA" "roles/run.invoker" "Compute Agent → Run Invoker"
+add_service_agent_binding "$COMPUTE_SA" "roles/eventarc.eventReceiver" "Compute Agent → Event Receiver"
 
 # -----------------------------------------------------------------------------
 # Step 9: Initialize Firestore
@@ -362,20 +419,128 @@ else
 fi
 
 if [[ -n "$BUCKET" ]]; then
-    # Check if Eventarc SA already has access
-    if gsutil iam get "$BUCKET" 2>/dev/null | grep -q "$EVENTARC_SA"; then
+    # Check if Eventarc service agent exists
+    if ! sa_exists "$EVENTARC_SA"; then
+        log_info "Eventarc agent bucket access - skipped (service agent not yet created)"
+    elif gsutil iam get "$BUCKET" 2>/dev/null | grep -q "$EVENTARC_SA"; then
         log_skip "Eventarc agent bucket access"
     else
-        gsutil iam ch "serviceAccount:${EVENTARC_SA}:objectViewer" "$BUCKET"
-        log_success "Granted Eventarc agent bucket access"
+        if gsutil iam ch "serviceAccount:${EVENTARC_SA}:objectViewer" "$BUCKET" 2>/dev/null; then
+            log_success "Granted Eventarc agent bucket access"
+        else
+            log_info "Eventarc agent bucket access - skipped (will be configured on first deploy)"
+        fi
     fi
 fi
 
 # -----------------------------------------------------------------------------
-# Step 11: Create Service Account Key for GitHub Actions
+# Step 11: Set Up Workload Identity Federation for Cloud Run (GitHub Actions)
 # -----------------------------------------------------------------------------
 
-log_step "Service account key for CI/CD..."
+log_step "Workload Identity Federation for Cloud Run..."
+
+if [[ -z "$GITHUB_REPO" ]]; then
+    log_info "GitHub repo not specified - skipping Workload Identity setup"
+    log_info "To set up later, rerun with: $0 $PROJECT_ID $BILLING_ACCOUNT org/repo"
+    WIF_PROVIDER=""
+    GITHUB_SA_EMAIL=""
+else
+    # Check if workload identity pool exists
+    POOL_NAME="github-pool"
+    PROVIDER_NAME="github-provider"
+
+    if gcloud iam workload-identity-pools describe "$POOL_NAME" \
+        --location="global" \
+        --project="$PROJECT_ID" &>/dev/null; then
+        log_skip "Workload Identity Pool '$POOL_NAME' exists"
+    else
+        gcloud iam workload-identity-pools create "$POOL_NAME" \
+            --project="$PROJECT_ID" \
+            --location="global" \
+            --display-name="GitHub Actions Pool"
+        log_success "Created Workload Identity Pool"
+    fi
+
+    # Check if provider exists
+    if gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" \
+        --workload-identity-pool="$POOL_NAME" \
+        --location="global" \
+        --project="$PROJECT_ID" &>/dev/null; then
+        log_skip "Workload Identity Provider '$PROVIDER_NAME' exists"
+    else
+        # Extract owner from GITHUB_REPO (e.g., "owner/repo" -> "owner")
+        GITHUB_OWNER="${GITHUB_REPO%%/*}"
+
+        gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+            --project="$PROJECT_ID" \
+            --location="global" \
+            --workload-identity-pool="$POOL_NAME" \
+            --display-name="GitHub Provider" \
+            --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+            --attribute-condition="assertion.repository_owner=='${GITHUB_OWNER}'" \
+            --issuer-uri="https://token.actions.githubusercontent.com"
+        log_success "Created Workload Identity Provider"
+    fi
+
+    # Create service account for GitHub Actions (Cloud Run deployment)
+    GITHUB_SA_NAME="github-actions"
+    GITHUB_SA_EMAIL="${GITHUB_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    if gcloud iam service-accounts describe "$GITHUB_SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+        log_skip "GitHub Actions service account exists"
+    else
+        gcloud iam service-accounts create "$GITHUB_SA_NAME" \
+            --project="$PROJECT_ID" \
+            --display-name="GitHub Actions CI/CD"
+        log_success "Created GitHub Actions service account"
+
+        # Wait for service account to propagate (GCP eventual consistency)
+        log_info "Waiting for service account to propagate..."
+        for i in {1..12}; do
+            if gcloud iam service-accounts describe "$GITHUB_SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+                break
+            fi
+            sleep 5
+        done
+    fi
+
+    # Grant Cloud Run deployment permissions
+    GITHUB_SA_ROLES=(
+        "roles/run.admin"
+        "roles/cloudbuild.builds.builder"
+        "roles/storage.admin"
+        "roles/iam.serviceAccountUser"
+    )
+
+    for role in "${GITHUB_SA_ROLES[@]}"; do
+        add_iam_binding "serviceAccount:$GITHUB_SA_EMAIL" "$role" "GitHub Actions SA → $role"
+    done
+
+    # Allow GitHub to impersonate the service account
+    WIF_MEMBER="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_NAME}/attribute.repository/${GITHUB_REPO}"
+
+    if gcloud iam service-accounts get-iam-policy "$GITHUB_SA_EMAIL" \
+        --project="$PROJECT_ID" --format=json 2>/dev/null | \
+        jq -e ".bindings[] | select(.role==\"roles/iam.workloadIdentityUser\") | .members[] | select(.==\"$WIF_MEMBER\")" &>/dev/null; then
+        log_skip "GitHub repo can impersonate service account"
+    else
+        gcloud iam service-accounts add-iam-policy-binding "$GITHUB_SA_EMAIL" \
+            --project="$PROJECT_ID" \
+            --role="roles/iam.workloadIdentityUser" \
+            --member="$WIF_MEMBER" \
+            --quiet > /dev/null
+        log_success "Granted GitHub repo impersonation rights"
+    fi
+
+    WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_NAME}/providers/${PROVIDER_NAME}"
+    log_info "Workload Identity Provider: $WIF_PROVIDER"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 12: Create Service Account Key for Firebase Deployment
+# -----------------------------------------------------------------------------
+
+log_step "Service account key for Firebase CI/CD..."
 
 KEY_FILE="firebase-sa-key.json"
 
@@ -399,33 +564,76 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 12: Set Gemini API Secret
+# Step 13: Create Gemini API Key and Secret
 # -----------------------------------------------------------------------------
 
-log_step "Gemini API secret..."
+log_step "Gemini API key and secret..."
 
-# Check if secret exists
+# Check if secret already exists
 if gcloud secrets describe GEMINI_API_KEY --project="$PROJECT_ID" &>/dev/null; then
     log_skip "GEMINI_API_KEY secret already exists"
 else
-    read -p "  Set GEMINI_API_KEY now? (y/N) " -n 1 -r
+    read -p "  Create Gemini API key now? (y/N) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "  Enter your Gemini API key (get one at https://makersuite.google.com/app/apikey):"
-        read -s GEMINI_KEY
-        echo
-        echo -n "$GEMINI_KEY" | gcloud secrets create GEMINI_API_KEY \
-            --data-file=- \
-            --project="$PROJECT_ID"
-        log_success "Created GEMINI_API_KEY secret"
+        # Create API key restricted to Generative Language API
+        log_info "Creating API key for Gemini..."
+        API_KEY_NAME="gemini-api-key"  # pragma: allowlist secret
+
+        # Check if API key already exists
+        EXISTING_KEY=$(gcloud services api-keys list \
+            --project="$PROJECT_ID" \
+            --filter="displayName='$API_KEY_NAME'" \
+            --format="value(name)" 2>/dev/null | head -1)
+
+        if [[ -n "$EXISTING_KEY" ]]; then
+            log_info "API key '$API_KEY_NAME' already exists, retrieving..."
+            GEMINI_KEY=$(gcloud services api-keys get-key-string "$EXISTING_KEY" \
+                --format="value(keyString)" 2>/dev/null)
+        else
+            # Create new API key restricted to Generative Language API
+            KEY_RESULT=$(gcloud services api-keys create \
+                --project="$PROJECT_ID" \
+                --display-name="$API_KEY_NAME" \
+                --api-target=service=generativelanguage.googleapis.com \
+                --format=json 2>/dev/null)
+
+            # Extract the key name from the operation result
+            KEY_NAME=$(echo "$KEY_RESULT" | jq -r '.response.name // .name // empty')
+
+            if [[ -z "$KEY_NAME" ]]; then
+                # Sometimes the create command returns the key directly
+                GEMINI_KEY=$(echo "$KEY_RESULT" | jq -r '.response.keyString // .keyString // empty')
+                if [[ -z "$GEMINI_KEY" ]]; then
+                    log_error "Failed to create API key. Create manually at:"
+                    log_info "https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID"
+                    GEMINI_KEY=""
+                fi
+            else
+                # Get the key string from the created key
+                GEMINI_KEY=$(gcloud services api-keys get-key-string "$KEY_NAME" \
+                    --format="value(keyString)" 2>/dev/null)
+            fi
+            log_success "Created Gemini API key"
+        fi
+
+        # Store in Secret Manager
+        if [[ -n "$GEMINI_KEY" ]]; then
+            echo -n "$GEMINI_KEY" | gcloud secrets create GEMINI_API_KEY \
+                --data-file=- \
+                --project="$PROJECT_ID"
+            log_success "Stored GEMINI_API_KEY in Secret Manager"
+        fi
     else
-        log_info "Skipped - set manually with:"
-        log_info "npx firebase functions:secrets:set GEMINI_API_KEY"
+        log_info "Skipped - create manually:"
+        log_info "1. Enable API: gcloud services enable generativelanguage.googleapis.com --project=$PROJECT_ID"
+        log_info "2. Create key: https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID"
+        log_info "3. Store secret: npx firebase functions:secrets:set GEMINI_API_KEY"
     fi
 fi
 
 # -----------------------------------------------------------------------------
-# Step 13: Enable Firebase Authentication
+# Step 14: Enable Firebase Authentication
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Authentication..."
@@ -435,7 +643,7 @@ log_info "https://console.firebase.google.com/project/$PROJECT_ID/authentication
 log_info "Enable Google provider and set support email"
 
 # -----------------------------------------------------------------------------
-# Step 14: Register Web App
+# Step 15: Register Web App
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Web App..."
@@ -464,7 +672,7 @@ log_info "firebase apps:sdkconfig WEB --project=$PROJECT_ID"
 
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  Setup Complete!${NC}"
+echo -e "${GREEN}  Setup Complete! (Single Project Architecture)${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "  Project ID:     $PROJECT_ID"
@@ -472,34 +680,53 @@ echo "  Project Number: $PROJECT_NUMBER"
 echo "  Region:         $REGION"
 echo ""
 echo "  Service Accounts:"
-echo "    Deployment: $SA_EMAIL"
-echo "    Runtime:    $RUNTIME_SA"
+echo "    Firebase Deployment: $SA_EMAIL"
+echo "    Functions Runtime:   $RUNTIME_SA"
+if [[ -n "$GITHUB_SA_EMAIL" ]]; then
+echo "    GitHub Actions:      $GITHUB_SA_EMAIL"
+fi
 echo ""
+if [[ -n "$WIF_PROVIDER" ]]; then
+echo "  Workload Identity Federation (for Cloud Run):"
+echo "    Provider: $WIF_PROVIDER"
+echo ""
+fi
 echo "  Next Steps:"
 echo "    1. Enable Google Auth: https://console.firebase.google.com/project/$PROJECT_ID/authentication/providers"
 echo "    2. Get web config:     firebase apps:sdkconfig WEB --project=$PROJECT_ID"
-echo "    3. Update .env with Firebase config values"
+echo "    3. Update .env with Firebase config values (GCP_PROJECT_ID = $PROJECT_ID)"
 echo "    4. Configure GitHub Secrets (see below)"
 echo "    5. Deploy:             firebase deploy --project=$PROJECT_ID"
 echo ""
-echo "  ┌─────────────────────────────────────────────────────────────────────┐"
-echo "  │  Required GitHub Secrets for CI/CD                                  │"
-echo "  ├─────────────────────────────────────────────────────────────────────┤"
-echo "  │  Firebase Deploy Workflow (.github/workflows/firebase-deploy.yml):  │"
-echo "  │    • FIREBASE_SERVICE_ACCOUNT     - Contents of $KEY_FILE           │"
-echo "  │                                                                     │"
-echo "  │  Cloud Run Deploy Workflow (.github/workflows/deploy.yml):          │"
-echo "  │    • GCP_PROJECT_ID               - $PROJECT_ID                     │"
-echo "  │    • GCP_WORKLOAD_IDENTITY_PROVIDER - Workload Identity pool        │"
-echo "  │    • GCP_SERVICE_ACCOUNT          - Service account email           │"
-echo "  │    • VITE_FIREBASE_API_KEY        - From firebase apps:sdkconfig    │"
-echo "  │    • VITE_FIREBASE_AUTH_DOMAIN    - ${PROJECT_ID}.firebaseapp.com   │"
-echo "  │    • VITE_FIREBASE_PROJECT_ID     - $PROJECT_ID                     │"
-echo "  │    • VITE_FIREBASE_STORAGE_BUCKET - From firebase apps:sdkconfig    │"
-echo "  │    • VITE_FIREBASE_MESSAGING_SENDER_ID - From sdkconfig             │"
-echo "  │    • VITE_FIREBASE_APP_ID         - From firebase apps:sdkconfig    │"
-echo "  │    • ALIGNMENT_SERVICE_URL        - Cloud Run alignment service URL │"
-echo "  └─────────────────────────────────────────────────────────────────────┘"
+echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+echo "  │  Required GitHub Secrets for CI/CD (Single Project)                     │"
+echo "  ├─────────────────────────────────────────────────────────────────────────┤"
+echo "  │  Firebase Deploy Workflow (.github/workflows/firebase-deploy.yml):      │"
+echo "  │    • FIREBASE_SERVICE_ACCOUNT     - Contents of $KEY_FILE               │"
+echo "  │                                                                         │"
+echo "  │  Cloud Run Deploy Workflow (.github/workflows/deploy.yml):              │"
+echo "  │    • GCP_PROJECT_ID               - $PROJECT_ID"
+if [[ -n "$WIF_PROVIDER" ]]; then
+echo "  │    • GCP_WORKLOAD_IDENTITY_PROVIDER - $WIF_PROVIDER"
+echo "  │    • GCP_SERVICE_ACCOUNT          - $GITHUB_SA_EMAIL"
+else
+echo "  │    • GCP_WORKLOAD_IDENTITY_PROVIDER - (run script with github-repo arg) │"
+echo "  │    • GCP_SERVICE_ACCOUNT          - (run script with github-repo arg)   │"
+fi
+echo "  │    • VITE_FIREBASE_API_KEY        - From firebase apps:sdkconfig        │"
+echo "  │    • VITE_FIREBASE_AUTH_DOMAIN    - ${PROJECT_ID}.firebaseapp.com       │"
+echo "  │    • VITE_FIREBASE_PROJECT_ID     - $PROJECT_ID"
+echo "  │    • VITE_FIREBASE_STORAGE_BUCKET - From firebase apps:sdkconfig        │"
+echo "  │    • VITE_FIREBASE_MESSAGING_SENDER_ID - From sdkconfig                 │"
+echo "  │    • VITE_FIREBASE_APP_ID         - From firebase apps:sdkconfig        │"
+echo "  └─────────────────────────────────────────────────────────────────────────┘"
+echo ""
+echo "  ⚠️  IMPORTANT: Use the SAME project ($PROJECT_ID) for both Cloud Run and Firebase!"
+echo "      This ensures unified billing, simpler IAM, and seamless integration."
+echo ""
+echo "  ℹ️  NOTE: Some service agent bindings may have been skipped because the agents"
+echo "      don't exist yet. Don't worry - the GitHub Actions workflow will configure"
+echo "      them automatically on each deployment."
 echo ""
 echo "  To get Firebase config values, run:"
 echo "    firebase apps:sdkconfig WEB --project=$PROJECT_ID"
@@ -508,5 +735,9 @@ echo "  Useful Links:"
 echo "    Firebase Console: https://console.firebase.google.com/project/$PROJECT_ID"
 echo "    GCP Console:      https://console.cloud.google.com/home/dashboard?project=$PROJECT_ID"
 echo "    Billing:          https://console.cloud.google.com/billing/linkedaccount?project=$PROJECT_ID"
+if [[ -n "$GITHUB_REPO" ]]; then
+echo "    GitHub Secrets:   https://github.com/$GITHUB_REPO/settings/secrets/actions"
+else
 echo "    GitHub Secrets:   https://github.com/<owner>/<repo>/settings/secrets/actions"
+fi
 echo ""
