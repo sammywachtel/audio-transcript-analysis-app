@@ -561,6 +561,7 @@ The application requires the following Google Cloud APIs:
 | API | Service | Purpose |
 |-----|---------|---------|
 | `cloudfunctions.googleapis.com` | Cloud Functions | Serverless function execution |
+| `cloudscheduler.googleapis.com` | Cloud Scheduler | Scheduled functions (daily stats aggregation) |
 | `cloudbuild.googleapis.com` | Cloud Build | Build container images for functions |
 | `artifactregistry.googleapis.com` | Artifact Registry | Store container images |
 | `run.googleapis.com` | Cloud Run | Functions v2 runtime (functions run as containers) |
