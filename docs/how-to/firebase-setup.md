@@ -108,6 +108,7 @@ Enable each API by clicking the links below:
 | API | Purpose | Link |
 |-----|---------|------|
 | **Cloud Functions** | Run server-side transcription | [Enable](https://console.cloud.google.com/apis/library/cloudfunctions.googleapis.com) |
+| **Cloud Scheduler** | Scheduled functions (daily stats aggregation) | [Enable](https://console.cloud.google.com/apis/library/cloudscheduler.googleapis.com) |
 | **Cloud Build** | Build container images | [Enable](https://console.cloud.google.com/apis/library/cloudbuild.googleapis.com) |
 | **Artifact Registry** | Store container images | [Enable](https://console.cloud.google.com/apis/library/artifactregistry.googleapis.com) |
 | **Secret Manager** | Store API keys securely | [Enable](https://console.cloud.google.com/apis/library/secretmanager.googleapis.com) |
@@ -128,6 +129,7 @@ PROJECT_ID="your-project-id"
 # Enable all required APIs in a single command
 gcloud services enable \
   cloudfunctions.googleapis.com \
+  cloudscheduler.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \

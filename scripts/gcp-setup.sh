@@ -260,6 +260,7 @@ APIS=(
     "identitytoolkit.googleapis.com"
     # Cloud Functions
     "cloudfunctions.googleapis.com"
+    "cloudscheduler.googleapis.com"
     "eventarc.googleapis.com"
     "pubsub.googleapis.com"
     # Cloud Run (frontend)
