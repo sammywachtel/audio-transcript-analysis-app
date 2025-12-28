@@ -70,7 +70,7 @@ export interface EstimatedCost {
 export interface ProcessingMetrics {
   conversationId: string;
   userId: string;
-  status: 'success' | 'failed';
+  status: 'success' | 'failed' | 'aborted';
   errorMessage?: string;
   alignmentStatus?: 'aligned' | 'fallback';
 

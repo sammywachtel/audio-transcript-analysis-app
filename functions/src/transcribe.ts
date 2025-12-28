@@ -30,6 +30,65 @@ const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For speaker diarization
 
+/**
+ * Custom error for abort requests - allows clean exit from processing
+ */
+class AbortRequestedError extends Error {
+  constructor(conversationId: string) {
+    super(`Processing aborted by user for conversation ${conversationId}`);
+    this.name = 'AbortRequestedError';
+  }
+}
+
+/**
+ * Check if abort has been requested for this conversation.
+ * Throws AbortRequestedError if abort flag is set.
+ */
+async function checkAbort(conversationId: string): Promise<void> {
+  const doc = await db.collection('conversations').doc(conversationId).get();
+  if (doc.exists && doc.data()?.abortRequested === true) {
+    console.log('[Transcribe] Abort requested, stopping processing:', { conversationId });
+    throw new AbortRequestedError(conversationId);
+  }
+}
+
+/**
+ * Retry an operation with exponential backoff.
+ * Useful for transient Firestore timeouts (DEADLINE_EXCEEDED).
+ */
+async function retryWithBackoff<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  maxRetries = 3,
+  baseDelayMs = 2000
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isRetryable = errorMessage.includes('DEADLINE_EXCEEDED') ||
+                          errorMessage.includes('UNAVAILABLE') ||
+                          errorMessage.includes('RESOURCE_EXHAUSTED');
+
+      if (!isRetryable || attempt === maxRetries) {
+        console.error(`[Retry] ${operationName} failed after ${attempt} attempts:`, errorMessage);
+        throw error;
+      }
+
+      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      console.warn(`[Retry] ${operationName} attempt ${attempt} failed, retrying in ${delay}ms...`, {
+        error: errorMessage,
+        attempt,
+        maxRetries,
+        delayMs: delay
+      });
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error(`${operationName} failed after ${maxRetries} retries`);
+}
+
 // Gemini analysis-only response (analyzes WhisperX transcript)
 interface GeminiAnalysis {
   title: string;
@@ -182,6 +241,36 @@ export const transcribeAudio = onObjectFinalized(
     // Initialize progress tracking (before try block so it's accessible in catch)
     const progressManager = new ProgressManager(conversationId);
 
+    // Track partial metrics for abort scenarios - updated as processing progresses
+    // This allows us to record resource usage even if user aborts mid-process
+    const partialMetrics = {
+      timingMs: {
+        download: 0,
+        whisperx: 0,
+        buildSegments: 0,
+        gemini: 0,
+        speakerCorrection: 0,
+        transform: 0,
+        firestore: 0,
+        total: 0
+      },
+      llmUsage: {
+        geminiAnalysis: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+        geminiSpeakerCorrection: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+        whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const },
+        diarization: { predictionId: '', computeTimeSeconds: 0, model: 'pyannote-diarization' as const }
+      },
+      segmentCount: 0,
+      speakerCount: 0,
+      termCount: 0,
+      topicCount: 0,
+      personCount: 0,
+      speakerCorrectionsApplied: 0,
+      audioSizeMB: event.data.size ? event.data.size / (1024 * 1024) : 0,
+      durationMs: 0,
+      processStartTime: Date.now()
+    };
+
     try {
       // Update status to processing
       await db.collection('conversations').doc(conversationId).update({
@@ -206,6 +295,12 @@ export const transcribeAudio = onObjectFinalized(
         downloadDurationMs,
         downloadSpeedMBps: ((audioBuffer.length / (1024 * 1024)) / (downloadDurationMs / 1000)).toFixed(2)
       });
+
+      // Update partial metrics after download
+      partialMetrics.timingMs.download = downloadDurationMs;
+
+      // Check for abort after download
+      await checkAbort(conversationId);
 
       // === NEW ARCHITECTURE: WhisperX-first transcription ===
       // Step 1: Get transcript + timestamps from WhisperX
@@ -238,6 +333,17 @@ export const transcribeAudio = onObjectFinalized(
         firstSegment: whisperxResult.segments[0],
         lastSegment: whisperxResult.segments[whisperxResult.segments.length - 1]
       });
+
+      // Update partial metrics after WhisperX (most expensive step)
+      partialMetrics.timingMs.whisperx = whisperxDurationMs;
+      // Estimate compute time from wall-clock time (GPU runs in real-time for transcription)
+      // This is approximate but captures the relative cost for abort scenarios
+      const estimatedComputeSeconds = whisperxDurationMs / 1000;
+      partialMetrics.llmUsage.whisperx.computeTimeSeconds = estimatedComputeSeconds;
+      partialMetrics.llmUsage.diarization.computeTimeSeconds = estimatedComputeSeconds * 0.3; // ~30% is diarization
+
+      // Check for abort after WhisperX (most expensive step)
+      await checkAbort(conversationId);
 
       // Step 2: Build segments from WhisperX output
       console.debug('[Transcribe] Step 2: Building segments from WhisperX...');
@@ -283,6 +389,22 @@ export const transcribeAudio = onObjectFinalized(
         outputTokens: geminiAnalysisTokens.outputTokens
       });
 
+      // Update partial metrics after Gemini analysis
+      partialMetrics.timingMs.gemini = geminiDurationMs;
+      partialMetrics.llmUsage.geminiAnalysis = {
+        inputTokens: geminiAnalysisTokens.inputTokens,
+        outputTokens: geminiAnalysisTokens.outputTokens,
+        model: 'gemini-2.5-flash'
+      };
+      partialMetrics.segmentCount = whisperxSegments.segments.length;
+      partialMetrics.speakerCount = whisperxSegments.speakers.length;
+      partialMetrics.termCount = analysis.terms?.length ?? 0;
+      partialMetrics.topicCount = analysis.topics?.length ?? 0;
+      partialMetrics.personCount = analysis.people?.length ?? 0;
+
+      // Check for abort after Gemini analysis
+      await checkAbort(conversationId);
+
       // Step 3.5: Speaker reassignment pass (reassign only, no splits/timestamp changes)
       console.log('[Transcribe] Step 3.5: Identifying speaker reassignments...');
       const speakerCorrectionStartTime = Date.now();
@@ -303,6 +425,15 @@ export const transcribeAudio = onObjectFinalized(
         inputTokens: geminiCorrectionTokens.inputTokens,
         outputTokens: geminiCorrectionTokens.outputTokens
       });
+
+      // Update partial metrics after speaker correction
+      partialMetrics.timingMs.speakerCorrection = speakerCorrectionDurationMs;
+      partialMetrics.llmUsage.geminiSpeakerCorrection = {
+        inputTokens: geminiCorrectionTokens.inputTokens,
+        outputTokens: geminiCorrectionTokens.outputTokens,
+        model: 'gemini-2.5-flash'
+      };
+      partialMetrics.speakerCorrectionsApplied = speakerCorrections.length;
 
       // Apply speaker reassignments (no timestamp manipulation)
       if (speakerCorrections.length > 0) {
@@ -335,17 +466,24 @@ export const transcribeAudio = onObjectFinalized(
         durationMs: processedData.durationMs
       });
 
-      // Save results to Firestore
+      // Check for abort before final save
+      await checkAbort(conversationId);
+
+      // Save results to Firestore (with retry for transient failures)
       console.debug('[Transcribe] Saving results to Firestore...');
       const firestoreStartTime = Date.now();
-      await db.collection('conversations').doc(conversationId).update({
-        ...processedData,
-        status: 'complete',
-        alignmentStatus: 'aligned',  // Always aligned since WhisperX is the source
-        alignmentError: null,
-        audioStoragePath: filePath,
-        updatedAt: FieldValue.serverTimestamp()
-      });
+      await retryWithBackoff(
+        () => db.collection('conversations').doc(conversationId).update({
+          ...processedData,
+          status: 'complete',
+          alignmentStatus: 'aligned',  // Always aligned since WhisperX is the source
+          alignmentError: null,
+          abortRequested: false,  // Clear any abort flag
+          audioStoragePath: filePath,
+          updatedAt: FieldValue.serverTimestamp()
+        }),
+        'Firestore save results'
+      );
       const firestoreDurationMs = Date.now() - firestoreStartTime;
 
       const totalDurationMs = Date.now() - downloadStartTime;
@@ -439,6 +577,66 @@ export const transcribeAudio = onObjectFinalized(
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const isAbort = error instanceof AbortRequestedError;
+
+      if (isAbort) {
+        // Handle abort - record partial metrics since we still consumed resources
+        console.log('[Transcribe] ⏹️ Processing aborted by user:', { conversationId });
+
+        // Calculate total time elapsed
+        partialMetrics.timingMs.total = Date.now() - partialMetrics.processStartTime;
+
+        // Calculate estimated cost from whatever LLM resources were consumed
+        const partialCost = await calculateCost(partialMetrics.llmUsage);
+
+        console.log('[Transcribe] Recording partial metrics on abort:', {
+          conversationId,
+          elapsedMs: partialMetrics.timingMs.total,
+          whisperxTime: partialMetrics.llmUsage.whisperx.computeTimeSeconds,
+          geminiInputTokens: partialMetrics.llmUsage.geminiAnalysis.inputTokens,
+          estimatedCostUsd: partialCost.totalUsd
+        });
+
+        // Record metrics for observability - aborted jobs still cost money!
+        await recordMetrics({
+          conversationId,
+          userId,
+          status: 'aborted',
+          errorMessage: 'Processing was cancelled by user',
+          timingMs: partialMetrics.timingMs,
+          segmentCount: partialMetrics.segmentCount,
+          speakerCount: partialMetrics.speakerCount,
+          termCount: partialMetrics.termCount,
+          topicCount: partialMetrics.topicCount,
+          personCount: partialMetrics.personCount,
+          speakerCorrectionsApplied: partialMetrics.speakerCorrectionsApplied,
+          audioSizeMB: partialMetrics.audioSizeMB,
+          durationMs: partialMetrics.durationMs,
+          llmUsage: partialMetrics.llmUsage,
+          estimatedCost: partialCost
+        });
+
+        // Record processing_aborted event for user stats
+        await recordUserEvent({
+          eventType: 'processing_aborted',
+          userId,
+          conversationId,
+          metadata: {
+            estimatedCostUsd: partialCost.totalUsd,
+            elapsedMs: partialMetrics.timingMs.total
+          }
+        });
+
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'aborted',
+          processingError: 'Processing was cancelled by user',
+          abortRequested: false,  // Clear the flag
+          updatedAt: FieldValue.serverTimestamp()
+        });
+
+        await progressManager.setFailed('Aborted by user');
+        return;
+      }
 
       console.error('[Transcribe] ❌ Transcription failed:', {
         conversationId,
