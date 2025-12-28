@@ -77,19 +77,12 @@ npx firebase functions:secrets:set ALIGNMENT_SERVICE_URL   # WhisperX alignment 
 
 ## Documentation
 
-Documentation is organized using the [Diátaxis framework](https://diataxis.fr/) in [`/docs/`](docs/):
+Documentation lives in [`/docs/`](docs/) using Diátaxis. See `~/.claude/CLAUDE.md` for documentation standards.
 
-- **[tutorials/](docs/tutorials/)** - Learning-oriented guides (getting started)
-- **[how-to/](docs/how-to/)** - Task-oriented guides (Firebase setup, deployment, testing)
-- **[reference/](docs/reference/)** - Technical reference (architecture, data model)
-- **[explanation/](docs/explanation/)** - Background and design decisions
-
-IMPORTANT: Update documents any time changes occur involving project/library organization, architecture, process, functionality, algorithem, cicd, pipeline, authentication, data, data model, deployment, etc changes, it must be documented within the docs/ folder. There is no need to update documentation for low-level code changes, refactoring, bug fixing, or low-level implementation detail.
-
-When updating documentation:
-1. Place content in the appropriate Diátaxis category
-2. Update `docs/README.md` if adding new files
-3. Keep docs in sync with code changes
+- **[tutorials/](docs/tutorials/)** - Getting started guides
+- **[how-to/](docs/how-to/)** - Firebase setup, deployment, testing
+- **[reference/](docs/reference/)** - Architecture, data model
+- **[explanation/](docs/explanation/)** - Design decisions
 
 ## Key Technical Details
 
