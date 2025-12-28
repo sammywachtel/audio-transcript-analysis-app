@@ -1470,12 +1470,22 @@ export interface WhisperXResult {
  * @param huggingfaceToken - Optional Hugging Face token for speaker diarization
  *                           (pyannote.audio is a gated model that requires HF auth)
  */
+/**
+ * Optional hints to improve WhisperX diarization accuracy.
+ * Extracted from Gemini pre-analysis of the audio.
+ */
+export interface WhisperXDiarizationHints {
+  numSpeakers?: number;      // Expected number of speakers
+  speakerNames?: string[];   // Speaker names for the prompt parameter
+}
+
 export async function transcribeWithWhisperX(
   audioBuffer: Buffer,
   replicateToken: string,
-  huggingfaceToken?: string
+  huggingfaceToken?: string,
+  hints?: WhisperXDiarizationHints
 ): Promise<WhisperXResult> {
-  console.log('[WhisperX] Starting transcription (primary method)');
+  console.log('[WhisperX] Starting transcription (primary method)', hints ? { hints } : {});
 
   if (!replicateToken) {
     return {
@@ -1505,11 +1515,25 @@ export async function transcribeWithWhisperX(
       language: 'en'
     };
 
+    // Add diarization hints if provided (from Gemini pre-analysis)
+    if (hints?.numSpeakers && hints.numSpeakers > 0) {
+      inputParams.num_speakers = hints.numSpeakers;
+      console.log(`[WhisperX] Using num_speakers hint: ${hints.numSpeakers}`);
+    }
+    if (hints?.speakerNames && hints.speakerNames.length > 0) {
+      // The prompt parameter accepts speaker names/acronyms separated by punctuation
+      inputParams.prompt = hints.speakerNames.join(', ');
+      console.log(`[WhisperX] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
+    }
+
     // Note: huggingfaceToken is no longer needed - diarization is built-in
     if (huggingfaceToken) {
       console.log('[WhisperX] Note: HF token provided but not needed - diarization is built-in');
     }
-    console.log('[WhisperX] Speaker diarization enabled (built-in)');
+    console.log('[WhisperX] Speaker diarization enabled (built-in)', {
+      numSpeakers: inputParams.num_speakers || 'auto-detect',
+      prompt: inputParams.prompt || 'none'
+    });
 
     const startTime = Date.now();
     const output = await client.run(
@@ -1643,9 +1667,10 @@ export async function transcribeWithWhisperXRobust(
   audioBuffer: Buffer,
   replicateToken: string,
   huggingfaceToken?: string,
-  maxRetries: number = 2
+  maxRetries: number = 2,
+  hints?: WhisperXDiarizationHints
 ): Promise<WhisperXResult> {
-  console.log('[WhisperX-Robust] Starting transcription with enhanced error handling');
+  console.log('[WhisperX-Robust] Starting transcription with enhanced error handling', hints ? { hints } : {});
 
   if (!replicateToken) {
     return {
@@ -1675,6 +1700,16 @@ export async function transcribeWithWhisperXRobust(
         file_string: audioBase64,
         language: 'en'
       };
+
+      // Add diarization hints if provided (from Gemini pre-analysis)
+      if (hints?.numSpeakers && hints.numSpeakers > 0) {
+        inputParams.num_speakers = hints.numSpeakers;
+        console.log(`[WhisperX-Robust] Using num_speakers hint: ${hints.numSpeakers}`);
+      }
+      if (hints?.speakerNames && hints.speakerNames.length > 0) {
+        inputParams.prompt = hints.speakerNames.join(', ');
+        console.log(`[WhisperX-Robust] Using speaker names hint: ${hints.speakerNames.join(', ')}`);
+      }
 
       const startTime = Date.now();
 

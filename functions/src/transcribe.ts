@@ -16,7 +16,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
-import { transcribeWithWhisperX, transcribeWithWhisperXRobust, WhisperXSegment } from './alignment';
+import { transcribeWithWhisperX, transcribeWithWhisperXRobust, WhisperXSegment, WhisperXDiarizationHints } from './alignment';
 import {
   recordMetrics,
   calculateCost,
@@ -180,6 +180,232 @@ interface SpeakerCorrection {
   speakerAfter?: string;
   // For reassign action:
   newSpeaker?: string;
+}
+
+/**
+ * Hints for WhisperX diarization, extracted from Gemini pre-analysis.
+ * Passing num_speakers and speaker names improves diarization accuracy.
+ */
+interface WhisperXHints {
+  numSpeakers?: number;
+  speakerNames?: string[];  // e.g., ["Jimmy", "Bill"] for the prompt parameter
+}
+
+/**
+ * Result from Gemini pre-analysis of audio.
+ * Provides speaker hints for WhisperX AND full content analysis in one pass.
+ */
+interface GeminiPreAnalysisResult {
+  hints: WhisperXHints;
+  analysis: GeminiAnalysis;
+  tokenUsage: GeminiUsage;
+}
+
+/**
+ * Pre-analyze audio with Gemini to extract speaker hints and content analysis.
+ *
+ * This runs BEFORE WhisperX to:
+ * 1. Determine speaker count and names (hints for better diarization)
+ * 2. Extract terms, topics, people (full analysis - saves a second Gemini call)
+ *
+ * By front-loading analysis, we avoid wasting WhisperX compute on broken diarization.
+ */
+async function preAnalyzeAudioWithGemini(
+  audioBuffer: Buffer,
+  apiKey: string
+): Promise<GeminiPreAnalysisResult> {
+  console.log('[Gemini Pre-Analysis] Starting audio analysis for speaker hints + content...');
+  const startTime = Date.now();
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  // Use gemini-2.5-flash for audio analysis
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: SchemaType.OBJECT,
+        properties: {
+          // Speaker hints for WhisperX
+          speakerCount: { type: SchemaType.INTEGER },
+          speakers: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                id: { type: SchemaType.STRING },  // SPEAKER_00, SPEAKER_01, etc.
+                name: { type: SchemaType.STRING }, // Inferred name if mentioned
+                role: { type: SchemaType.STRING }  // host, guest, interviewer, etc.
+              },
+              required: ['id']
+            }
+          },
+          // Full content analysis (same as existing GeminiAnalysis)
+          title: { type: SchemaType.STRING },
+          topics: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                title: { type: SchemaType.STRING },
+                startApproxSeconds: { type: SchemaType.NUMBER },
+                endApproxSeconds: { type: SchemaType.NUMBER },
+                type: { type: SchemaType.STRING }
+              },
+              required: ['title', 'type']
+            }
+          },
+          terms: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                term: { type: SchemaType.STRING },
+                definition: { type: SchemaType.STRING },
+                aliases: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } }
+              },
+              required: ['term', 'definition']
+            }
+          },
+          people: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                name: { type: SchemaType.STRING },
+                affiliation: { type: SchemaType.STRING }
+              },
+              required: ['name']
+            }
+          }
+        },
+        required: ['speakerCount', 'speakers', 'title', 'topics', 'terms', 'people']
+      }
+    }
+  });
+
+  // Convert audio to base64
+  const audioBase64 = audioBuffer.toString('base64');
+
+  // Detect MIME type
+  let mimeType = 'audio/mpeg';
+  if (audioBuffer[0] === 0x52 && audioBuffer[1] === 0x49) {
+    mimeType = 'audio/wav';
+  } else if (audioBuffer[0] === 0x4F && audioBuffer[1] === 0x67) {
+    mimeType = 'audio/ogg';
+  }
+
+  const prompt = `
+Analyze this audio file and extract the following information:
+
+## Speaker Analysis (CRITICAL - be accurate about speaker count)
+1. How many distinct speakers are in this audio? Count carefully.
+2. For each speaker, provide:
+   - id: Use format SPEAKER_00, SPEAKER_01, etc.
+   - name: If the speaker introduces themselves or is addressed by name, provide it
+   - role: If apparent (e.g., "host", "guest", "interviewer", "expert")
+
+## Content Analysis
+3. title: A descriptive title for this conversation/audio
+4. topics: Major topics discussed, with approximate start/end times in seconds and type ("main" or "tangent")
+5. terms: Technical terms, jargon, or concepts that warrant definition
+6. people: People MENTIONED in the conversation (NOT the speakers themselves)
+
+Important:
+- Be conservative with speaker count - don't hallucinate extra speakers
+- Only include people in the "people" array if they are MENTIONED, not if they are speaking
+- For terms, focus on domain-specific vocabulary that a listener might need explained
+`;
+
+  console.log('[Gemini Pre-Analysis] Sending audio to Gemini...');
+
+  const result = await model.generateContent([
+    { text: prompt },
+    {
+      inlineData: {
+        mimeType,
+        data: audioBase64
+      }
+    }
+  ]);
+
+  const durationMs = Date.now() - startTime;
+  const responseText = result.response.text();
+
+  // Extract token usage
+  const usageMetadata = result.response.usageMetadata;
+  const tokenUsage: GeminiUsage = {
+    inputTokens: usageMetadata?.promptTokenCount || 0,
+    outputTokens: usageMetadata?.candidatesTokenCount || 0,
+    model: 'gemini-2.5-flash'
+  };
+
+  console.log(`[Gemini Pre-Analysis] Response received in ${(durationMs / 1000).toFixed(1)}s`, {
+    inputTokens: tokenUsage.inputTokens,
+    outputTokens: tokenUsage.outputTokens
+  });
+
+  // Parse response
+  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+  const parsed = JSON.parse(cleanJson) as {
+    speakerCount: number;
+    speakers: Array<{ id: string; name?: string; role?: string }>;
+    title: string;
+    topics: Array<{ title: string; startApproxSeconds?: number; endApproxSeconds?: number; type: string }>;
+    terms: Array<{ term: string; definition: string; aliases?: string[] }>;
+    people: Array<{ name: string; affiliation?: string }>;
+  };
+
+  // Build WhisperX hints
+  const speakerNames = parsed.speakers
+    .filter(s => s.name)
+    .map(s => s.name as string);
+
+  const hints: WhisperXHints = {
+    numSpeakers: parsed.speakerCount,
+    speakerNames: speakerNames.length > 0 ? speakerNames : undefined
+  };
+
+  // Convert to GeminiAnalysis format (topics need segment indices, which we'll map later)
+  const analysis: GeminiAnalysis = {
+    title: parsed.title,
+    // Topics will be remapped to segment indices after WhisperX provides timestamps
+    topics: parsed.topics.map((t, idx) => ({
+      title: t.title,
+      startSegmentIndex: 0,  // Will be mapped after WhisperX
+      endSegmentIndex: 0,    // Will be mapped after WhisperX
+      type: t.type === 'tangent' ? 'tangent' as const : 'main' as const,
+      // Store approximate times for later mapping
+      _startApproxSeconds: t.startApproxSeconds,
+      _endApproxSeconds: t.endApproxSeconds
+    } as GeminiAnalysis['topics'][0] & { _startApproxSeconds?: number; _endApproxSeconds?: number })),
+    terms: parsed.terms.map(t => ({
+      id: `term_${t.term.toLowerCase().replace(/\s+/g, '_')}`,
+      term: t.term,
+      definition: t.definition,
+      aliases: t.aliases || []
+    })),
+    people: parsed.people.map(p => ({
+      name: p.name,
+      affiliation: p.affiliation || ''
+    })),
+    speakerNotes: parsed.speakers.map(s => ({
+      speakerId: s.id,
+      inferredName: s.name,
+      role: s.role
+    }))
+  };
+
+  console.log('[Gemini Pre-Analysis] ✅ Analysis complete:', {
+    speakerCount: hints.numSpeakers,
+    speakerNames: hints.speakerNames,
+    topicCount: analysis.topics.length,
+    termCount: analysis.terms.length,
+    peopleCount: analysis.people.length
+  });
+
+  return { hints, analysis, tokenUsage };
 }
 
 /**
@@ -425,9 +651,44 @@ export const transcribeAudio = onObjectFinalized(
       // Check for abort after download
       await checkAbort(conversationId);
 
-      // === NEW ARCHITECTURE: WhisperX-first transcription with Gemini fallback ===
-      // Step 1: Get transcript + timestamps from WhisperX
-      console.log('[Transcribe] Step 1: Calling WhisperX for transcription...');
+      // === GEMINI-FIRST ARCHITECTURE ===
+      // Step 1: Pre-analyze with Gemini to get speaker hints + full content analysis
+      // This runs BEFORE WhisperX to provide hints that improve diarization accuracy
+      console.log('[Transcribe] Step 1: Pre-analyzing audio with Gemini...');
+      const preAnalysisStartTime = Date.now();
+
+      let preAnalysisResult: GeminiPreAnalysisResult | null = null;
+      let whisperxHints: WhisperXDiarizationHints | undefined;
+
+      try {
+        preAnalysisResult = await preAnalyzeAudioWithGemini(
+          audioBuffer,
+          geminiApiKey.value()
+        );
+
+        // Convert to WhisperX hints format
+        whisperxHints = {
+          numSpeakers: preAnalysisResult.hints.numSpeakers,
+          speakerNames: preAnalysisResult.hints.speakerNames
+        };
+
+        console.log('[Transcribe] Pre-analysis complete:', {
+          speakerCount: whisperxHints.numSpeakers,
+          speakerNames: whisperxHints.speakerNames,
+          durationMs: Date.now() - preAnalysisStartTime
+        });
+      } catch (error) {
+        // Pre-analysis is optional - continue without hints if it fails
+        console.warn('[Transcribe] Pre-analysis failed, continuing without hints:', error);
+      }
+
+      const preAnalysisDurationMs = Date.now() - preAnalysisStartTime;
+
+      // Check for abort after pre-analysis
+      await checkAbort(conversationId);
+
+      // Step 2: Get transcript + timestamps from WhisperX (with hints from Gemini)
+      console.log('[Transcribe] Step 2: Calling WhisperX for transcription with hints...');
       const whisperxStartTime = Date.now();
 
       // Pass HF token for speaker diarization (optional but recommended)
@@ -440,7 +701,9 @@ export const transcribeAudio = onObjectFinalized(
       let whisperxResult = await transcribeWithWhisperXRobust(
         audioBuffer,
         replicateApiToken.value(),
-        hfToken || undefined
+        hfToken || undefined,
+        2, // maxRetries
+        whisperxHints  // Pass the hints from Gemini pre-analysis
       );
 
       // If robust method failed, try standard method as backup
@@ -449,7 +712,8 @@ export const transcribeAudio = onObjectFinalized(
         whisperxResult = await transcribeWithWhisperX(
           audioBuffer,
           replicateApiToken.value(),
-          hfToken || undefined
+          hfToken || undefined,
+          whisperxHints  // Pass hints here too
         );
       }
 
@@ -519,29 +783,61 @@ export const transcribeAudio = onObjectFinalized(
       // Update progress: analyzing with Gemini
       await progressManager.setStep(ProcessingStep.ANALYZING);
 
-      // Step 3: Call Gemini to analyze the transcript (not the audio!)
-      console.log('[Transcribe] Step 3: Calling Gemini for analysis...');
-      const geminiStartTime = Date.now();
+      // Step 3: Get content analysis (use pre-analysis if available, otherwise call Gemini)
+      let analysis: GeminiAnalysis;
+      let geminiAnalysisTokens: GeminiUsage;
+      let geminiDurationMs: number;
 
-      const analysisResult = await analyzeTranscriptWithGemini(
-        whisperxSegments.segments,
-        whisperxSegments.speakers,
-        geminiApiKey.value()
-      );
-      const { analysis, tokenUsage: geminiAnalysisTokens } = analysisResult;
+      if (preAnalysisResult) {
+        // Use pre-analysis result (already paid for audio tokens, analysis included)
+        console.log('[Transcribe] Step 3: Using pre-analysis results (no additional Gemini call)');
 
-      const geminiDurationMs = Date.now() - geminiStartTime;
-      console.log('[Transcribe] Gemini analysis complete:', {
-        conversationId,
-        durationMs: geminiDurationMs,
-        durationSec: (geminiDurationMs / 1000).toFixed(1),
-        title: analysis.title,
-        termCount: analysis.terms?.length ?? 0,
-        topicCount: analysis.topics?.length ?? 0,
-        personCount: analysis.people?.length ?? 0,
-        inputTokens: geminiAnalysisTokens.inputTokens,
-        outputTokens: geminiAnalysisTokens.outputTokens
-      });
+        // Map topic timestamps (approximate seconds) to segment indices
+        analysis = {
+          ...preAnalysisResult.analysis,
+          topics: mapTopicTimesToSegmentIndices(
+            preAnalysisResult.analysis.topics,
+            whisperxSegments.segments
+          )
+        };
+        geminiAnalysisTokens = preAnalysisResult.tokenUsage;
+        geminiDurationMs = preAnalysisDurationMs; // Use pre-analysis time
+
+        console.log('[Transcribe] Pre-analysis results applied:', {
+          conversationId,
+          title: analysis.title,
+          termCount: analysis.terms?.length ?? 0,
+          topicCount: analysis.topics?.length ?? 0,
+          personCount: analysis.people?.length ?? 0,
+          inputTokens: geminiAnalysisTokens.inputTokens,
+          outputTokens: geminiAnalysisTokens.outputTokens
+        });
+      } else {
+        // Fallback: Call Gemini to analyze the transcript (pre-analysis failed or not available)
+        console.log('[Transcribe] Step 3: Calling Gemini for analysis (fallback)...');
+        const geminiStartTime = Date.now();
+
+        const analysisResult = await analyzeTranscriptWithGemini(
+          whisperxSegments.segments,
+          whisperxSegments.speakers,
+          geminiApiKey.value()
+        );
+        analysis = analysisResult.analysis;
+        geminiAnalysisTokens = analysisResult.tokenUsage;
+
+        geminiDurationMs = Date.now() - geminiStartTime;
+        console.log('[Transcribe] Gemini analysis complete:', {
+          conversationId,
+          durationMs: geminiDurationMs,
+          durationSec: (geminiDurationMs / 1000).toFixed(1),
+          title: analysis.title,
+          termCount: analysis.terms?.length ?? 0,
+          topicCount: analysis.topics?.length ?? 0,
+          personCount: analysis.people?.length ?? 0,
+          inputTokens: geminiAnalysisTokens.inputTokens,
+          outputTokens: geminiAnalysisTokens.outputTokens
+        });
+      }
 
       // Update partial metrics after Gemini analysis
       partialMetrics.timingMs.gemini = geminiDurationMs;
@@ -853,6 +1149,63 @@ export const transcribeAudio = onObjectFinalized(
     }
   }
 );
+
+/**
+ * Map topic approximate times (from Gemini pre-analysis) to segment indices.
+ *
+ * Gemini pre-analysis returns topics with approximate start/end times in seconds.
+ * We need to map these to segment indices based on WhisperX timestamps.
+ */
+function mapTopicTimesToSegmentIndices(
+  topics: Array<GeminiAnalysis['topics'][0] & { _startApproxSeconds?: number; _endApproxSeconds?: number }>,
+  segments: Array<{ startMs: number; endMs: number; index: number }>
+): GeminiAnalysis['topics'] {
+  if (topics.length === 0 || segments.length === 0) {
+    return topics.map(t => ({
+      title: t.title,
+      startSegmentIndex: 0,
+      endSegmentIndex: segments.length - 1,
+      type: t.type
+    }));
+  }
+
+  return topics.map(topic => {
+    // Find segment closest to start time
+    const startTimeMs = (topic._startApproxSeconds || 0) * 1000;
+    const endTimeMs = (topic._endApproxSeconds || Infinity) * 1000;
+
+    let startSegmentIndex = 0;
+    let endSegmentIndex = segments.length - 1;
+
+    // Find first segment that starts after or contains the topic start time
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i].startMs >= startTimeMs || segments[i].endMs >= startTimeMs) {
+        startSegmentIndex = i;
+        break;
+      }
+    }
+
+    // Find last segment that starts before or contains the topic end time
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (segments[i].startMs <= endTimeMs) {
+        endSegmentIndex = i;
+        break;
+      }
+    }
+
+    // Ensure end >= start
+    if (endSegmentIndex < startSegmentIndex) {
+      endSegmentIndex = startSegmentIndex;
+    }
+
+    return {
+      title: topic.title,
+      startSegmentIndex,
+      endSegmentIndex,
+      type: topic.type
+    };
+  });
+}
 
 /**
  * NEW: Build segments from WhisperX output
