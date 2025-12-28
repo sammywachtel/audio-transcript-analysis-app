@@ -29,5 +29,5 @@ export { getSignedAudioUrl } from './getAudioUrl';
 // Export stats tracking triggers
 export { onConversationCreated, onConversationDeleted } from './statsTriggers';
 
-// Export scheduled stats aggregation
-export { computeDailyStats } from './statsAggregator';
+// Export scheduled stats aggregation and manual trigger
+export { computeDailyStats, triggerStatsComputation } from './statsAggregator';

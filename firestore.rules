@@ -66,9 +66,10 @@ service cloud.firestore {
     // Observability Collections - Various read access, Cloud Functions write
     // =======================================================================
 
-    // Metrics collection - admin read only, Cloud Functions write
+    // Metrics collection - users can read their own, admin can read all
     match /_metrics/{doc} {
-      allow read: if isAdmin();
+      allow read: if isAdmin() ||
+        (isAuthenticated() && resource.data.userId == request.auth.uid);
       allow write: if false; // Only Cloud Functions can write metrics
     }
 

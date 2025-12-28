@@ -465,8 +465,82 @@ function calculateWindowStats(
 // Manual Trigger (for testing/backfill)
 // =============================================================================
 
+import { onCall, HttpsError, CallableRequest } from 'firebase-functions/v2/https';
+
 /**
  * HTTP-callable function to manually trigger stats computation
- * Useful for testing or catching up after missed runs
+ * Useful for testing, backfilling, or initial dashboard population.
+ *
+ * Only admins can call this function (checked via auth claim or Firestore lookup).
  */
+export const triggerStatsComputation = onCall(
+  {
+    region: 'us-central1',
+    memory: '512MiB',
+    timeoutSeconds: 300
+  },
+  async (request: CallableRequest) => {
+    // Check authentication
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be logged in to trigger stats computation');
+    }
+
+    const userId = request.auth.uid;
+
+    // Check if user is admin (via Firestore users collection)
+    const userDoc = await db.collection('users').doc(userId).get();
+    const isAdmin = userDoc.exists && userDoc.data()?.isAdmin === true;
+
+    if (!isAdmin) {
+      throw new HttpsError('permission-denied', 'Only admins can trigger stats computation');
+    }
+
+    log.info('Manual stats computation triggered', { userId });
+
+    try {
+      // Compute global stats
+      const globalStats = await computeGlobalStats();
+      await saveGlobalStats(globalStats);
+
+      // Compute yesterday's stats (if not already computed)
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      const existingDaily = await db.collection('_daily_stats').doc(yesterdayStr).get();
+      let dailyStatsResult = null;
+
+      if (!existingDaily.exists) {
+        const dailyStats = await computeYesterdayStats();
+        await saveDailyStats(dailyStats);
+        dailyStatsResult = {
+          date: dailyStats.date,
+          activeUsers: dailyStats.activeUsers,
+          jobsSucceeded: dailyStats.jobsSucceeded
+        };
+      }
+
+      log.info('Manual stats computation complete', { userId });
+
+      return {
+        success: true,
+        globalStats: {
+          totalUsers: globalStats.users.totalUsers,
+          totalConversations: globalStats.conversations.totalConversationsExisting,
+          totalJobs: globalStats.processing.totalJobsAllTime,
+          estimatedCostUsd: globalStats.llmUsage.estimatedTotalCostUsd
+        },
+        dailyStats: dailyStatsResult
+      };
+
+    } catch (error) {
+      log.error('Manual stats computation failed', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new HttpsError('internal', 'Stats computation failed');
+    }
+  }
+);
+
+// Export internal functions for use in scheduled function
 export { computeGlobalStats, computeYesterdayStats };
