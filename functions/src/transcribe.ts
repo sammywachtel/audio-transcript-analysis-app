@@ -1265,11 +1265,16 @@ function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
       console.log('[BuildSegments] Detected BROKEN diarization (near 50/50 split on word-level)');
       console.log(`[BuildSegments] Speaker distribution: ${JSON.stringify(speakerWordCounts)}`);
       console.log('[BuildSegments] Grouping by sentence boundaries ONLY, ignoring speaker assignments');
-      return groupWordSegmentsIgnoringSpeaker(whisperxSegments, speakers);
+
+      // Deduplicate repeated words (common WhisperX issue)
+      const deduplicatedSegments = deduplicateWhisperXWords(whisperxSegments);
+      return groupWordSegmentsIgnoringSpeaker(deduplicatedSegments, speakers);
     }
 
     console.log('[BuildSegments] Detected WORD-LEVEL output, grouping into sentences...');
-    return groupWordSegmentsBySpeaker(whisperxSegments, speakers);
+    // Deduplicate repeated words (common WhisperX issue)
+    const deduplicatedSegments = deduplicateWhisperXWords(whisperxSegments);
+    return groupWordSegmentsBySpeaker(deduplicatedSegments, speakers);
   }
 
   // Sentence-level output - use as-is
@@ -1393,6 +1398,38 @@ function groupWordSegmentsBySpeaker(
   console.debug('[BuildSegments] Speaker distribution:', speakerCounts);
 
   return { segments: groupedSegments, speakers };
+}
+
+/**
+ * Deduplicate consecutive repeated words from WhisperX output.
+ *
+ * WhisperX sometimes stutters and returns duplicate words. This function
+ * removes consecutive identical words while preserving timing from the first occurrence.
+ */
+function deduplicateWhisperXWords(segments: WhisperXSegment[]): WhisperXSegment[] {
+  if (segments.length === 0) return segments;
+
+  const deduplicated: WhisperXSegment[] = [];
+  let lastWord = '';
+
+  for (const seg of segments) {
+    const word = seg.text.trim().toLowerCase();
+
+    // Skip if this is an exact duplicate of the previous word
+    if (word === lastWord) {
+      continue;
+    }
+
+    deduplicated.push(seg);
+    lastWord = word;
+  }
+
+  const removed = segments.length - deduplicated.length;
+  if (removed > 0) {
+    console.log(`[BuildSegments] Deduplicated ${removed} repeated words (${((removed / segments.length) * 100).toFixed(1)}%)`);
+  }
+
+  return deduplicated;
 }
 
 /**
