@@ -1609,6 +1609,23 @@ export async function transcribeWithWhisperX(
 
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // Check if this is a JSON parsing error (common with large responses)
+    const isJsonError = errorMsg.includes('JSON') ||
+                        errorMsg.includes('position') ||
+                        errorMsg.includes('Unexpected');
+
+    if (isJsonError) {
+      console.error(
+        `[WhisperX] ❌ JSON parsing failed - likely response too large or truncated: ${errorMsg}`
+      );
+      return {
+        segments: [],
+        status: 'error',
+        error: `WhisperX response parsing failed (response may be too large): ${errorMsg}`
+      };
+    }
+
     console.error(`[WhisperX] ❌ API call failed: ${errorMsg}`);
     return {
       segments: [],
@@ -1616,6 +1633,166 @@ export async function transcribeWithWhisperX(
       error: `WhisperX API call failed: ${errorMsg}`
     };
   }
+}
+
+/**
+ * Alternative WhisperX transcription using predictions API with manual polling.
+ * More robust for large responses - handles streaming and retries.
+ */
+export async function transcribeWithWhisperXRobust(
+  audioBuffer: Buffer,
+  replicateToken: string,
+  huggingfaceToken?: string,
+  maxRetries: number = 2
+): Promise<WhisperXResult> {
+  console.log('[WhisperX-Robust] Starting transcription with enhanced error handling');
+
+  if (!replicateToken) {
+    return {
+      segments: [],
+      status: 'error',
+      error: 'REPLICATE_API_TOKEN not provided'
+    };
+  }
+
+  let lastError: string = '';
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const audioBase64 = audioBuffer.toString('base64');
+      const audioSizeMb = audioBuffer.length / (1024 * 1024);
+
+      console.log(
+        `[WhisperX-Robust] Attempt ${attempt}/${maxRetries}: ` +
+        `audio_size=${audioSizeMb.toFixed(2)}MB`
+      );
+
+      // Use predictions API for more control
+      const Replicate = (await import('replicate')).default;
+      const client = new Replicate({ auth: replicateToken });
+
+      const inputParams: Record<string, unknown> = {
+        file_string: audioBase64,
+        language: 'en'
+      };
+
+      const startTime = Date.now();
+
+      // Create prediction (doesn't wait for completion)
+      const prediction = await client.predictions.create({
+        model: WHISPERX_MODEL.split(':')[0] as `${string}/${string}`,
+        version: WHISPERX_MODEL.split(':')[1],
+        input: inputParams
+      });
+
+      console.log(`[WhisperX-Robust] Prediction created: ${prediction.id}`);
+
+      // Poll for completion with timeout
+      const maxWaitMs = 8 * 60 * 1000; // 8 minutes max
+      const pollIntervalMs = 5000; // Poll every 5 seconds
+      let elapsedMs = 0;
+
+      while (elapsedMs < maxWaitMs) {
+        const status = await client.predictions.get(prediction.id);
+
+        if (status.status === 'succeeded') {
+          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`[WhisperX-Robust] Prediction succeeded in ${duration}s`);
+
+          // Parse output
+          const segments = parseWhisperXOutput(status.output);
+
+          if (segments.length === 0) {
+            throw new Error('WhisperX returned no segments');
+          }
+
+          return { segments, status: 'success' };
+
+        } else if (status.status === 'failed' || status.status === 'canceled') {
+          throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);
+        }
+
+        // Still processing, wait and poll again
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        elapsedMs += pollIntervalMs;
+
+        if (elapsedMs % 30000 === 0) { // Log every 30 seconds
+          console.log(`[WhisperX-Robust] Still waiting... (${elapsedMs / 1000}s elapsed)`);
+        }
+      }
+
+      throw new Error(`Prediction timed out after ${maxWaitMs / 1000}s`);
+
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      lastError = errorMsg;
+
+      // Check if error is retryable
+      const isRetryable = errorMsg.includes('JSON') ||
+                          errorMsg.includes('timeout') ||
+                          errorMsg.includes('ETIMEDOUT') ||
+                          errorMsg.includes('ECONNRESET');
+
+      if (isRetryable && attempt < maxRetries) {
+        const backoffMs = 5000 * attempt;
+        console.warn(
+          `[WhisperX-Robust] Attempt ${attempt} failed (retryable), ` +
+          `waiting ${backoffMs}ms before retry: ${errorMsg}`
+        );
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      console.error(`[WhisperX-Robust] Attempt ${attempt} failed (not retrying): ${errorMsg}`);
+      break;
+    }
+  }
+
+  return {
+    segments: [],
+    status: 'error',
+    error: `WhisperX failed after ${maxRetries} attempts: ${lastError}`
+  };
+}
+
+/**
+ * Parse WhisperX output into segments
+ */
+function parseWhisperXOutput(output: unknown): WhisperXSegment[] {
+  const segments: WhisperXSegment[] = [];
+
+  if (typeof output !== 'object' || output === null) {
+    console.error('[WhisperX] Output is not an object');
+    return segments;
+  }
+
+  const outputObj = output as Record<string, unknown>;
+
+  // Log structure for debugging
+  console.log(`[WhisperX] Parsing output with keys: ${Object.keys(outputObj).join(', ')}`);
+
+  if (!Array.isArray(outputObj.segments)) {
+    console.error('[WhisperX] No segments array in output');
+    return segments;
+  }
+
+  for (const segment of outputObj.segments) {
+    if (typeof segment === 'object' && segment !== null) {
+      const segObj = segment as Record<string, unknown>;
+
+      const text = typeof segObj.text === 'string' ? segObj.text : '';
+      const start = typeof segObj.start === 'number' ? segObj.start : 0.0;
+      const end = typeof segObj.end === 'number' ? segObj.end : 0.0;
+      const speaker = typeof segObj.speaker === 'string' ? segObj.speaker : undefined;
+
+      if (text.trim()) {
+        segments.push({ text: text.trim(), start, end, speaker });
+      }
+    }
+  }
+
+  console.log(`[WhisperX] Parsed ${segments.length} segments`);
+  return segments;
 }
 
 /**

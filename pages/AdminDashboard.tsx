@@ -16,8 +16,9 @@
 
 import React, { useState } from 'react';
 import { Button } from '../components/Button';
-import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap } from 'lucide-react';
 import { formatTime } from '../utils';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 // Hooks
 import {
@@ -150,11 +151,61 @@ const OverviewTab: React.FC<OverviewTabProps> = ({
 }) => {
   const { data: stats, loading: statsLoading, error: statsError, refetch: refetchStats } = globalStats;
   const { data: daily, loading: dailyLoading, refetch: refetchDaily } = dailyStats;
+  const [computingStats, setComputingStats] = useState(false);
+  const [computeResult, setComputeResult] = useState<string | null>(null);
 
   const handleRefresh = () => {
     refetchStats();
     refetchDaily();
   };
+
+  const handleComputeStats = async () => {
+    setComputingStats(true);
+    setComputeResult(null);
+    try {
+      const functions = getFunctions();
+      const triggerStats = httpsCallable(functions, 'triggerStatsComputation');
+      const result = await triggerStats() as { data: { success: boolean; globalStats: { totalUsers: number; totalConversations: number } } };
+
+      if (result.data.success) {
+        setComputeResult(`Stats computed! ${result.data.globalStats.totalUsers} users, ${result.data.globalStats.totalConversations} conversations`);
+        // Refresh the data after computing
+        setTimeout(() => {
+          refetchStats();
+          refetchDaily();
+        }, 1000);
+      }
+    } catch (error) {
+      setComputeResult(`Error: ${error instanceof Error ? error.message : 'Failed to compute stats'}`);
+    } finally {
+      setComputingStats(false);
+    }
+  };
+
+  // Show compute button if no stats exist yet
+  if (!stats && !statsLoading && !statsError) {
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center">
+        <h3 className="text-lg font-medium text-amber-800 mb-2">No Stats Data Yet</h3>
+        <p className="text-amber-600 mb-4">
+          Stats are computed daily at 2 AM UTC. Click below to compute now.
+        </p>
+        <Button
+          onClick={handleComputeStats}
+          disabled={computingStats}
+          className="gap-2"
+        >
+          {computingStats ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+          {computingStats ? 'Computing...' : 'Compute Stats Now'}
+        </Button>
+        {computeResult && (
+          <p className={`mt-4 text-sm ${computeResult.startsWith('Error') ? 'text-red-600' : 'text-green-600'}`}>
+            {computeResult}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   if (statsError) {
     return (

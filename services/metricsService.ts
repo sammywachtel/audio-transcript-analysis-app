@@ -287,6 +287,10 @@ export async function getAllUserStatsSummaries(
 
 /**
  * Get recent processing metrics (admin or filtered by user)
+ *
+ * IMPORTANT: Non-admin users can only read their own metrics due to Firestore rules.
+ * The userId filter MUST be applied in the Firestore query, not client-side,
+ * otherwise non-admin users will get permission errors.
  */
 export async function getRecentMetrics(
   options: {
@@ -298,21 +302,30 @@ export async function getRecentMetrics(
   const { userId, maxResults = 50, status } = options;
 
   try {
-    let q = query(
-      collection(db, '_metrics'),
-      orderBy('timestamp', 'desc'),
-      limit(maxResults)
-    );
+    // Build query with optional userId filter
+    // For non-admins, userId MUST be provided to satisfy security rules
+    let q;
+    if (userId) {
+      // Query with userId filter - required for non-admins
+      q = query(
+        collection(db, '_metrics'),
+        where('userId', '==', userId),
+        orderBy('timestamp', 'desc'),
+        limit(maxResults)
+      );
+    } else {
+      // Query without userId filter - only works for admins
+      q = query(
+        collection(db, '_metrics'),
+        orderBy('timestamp', 'desc'),
+        limit(maxResults)
+      );
+    }
 
-    // Note: Firestore doesn't support dynamic where clauses well,
-    // so we filter client-side for simplicity
     const snapshot = await getDocs(q);
     let results = snapshot.docs.map(doc => doc.data() as ProcessingMetric);
 
-    // Apply filters
-    if (userId) {
-      results = results.filter(m => m.userId === userId);
-    }
+    // Apply status filter client-side (minor optimization potential but keeps code simple)
     if (status) {
       results = results.filter(m => m.status === status);
     }

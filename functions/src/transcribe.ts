@@ -16,7 +16,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
-import { transcribeWithWhisperX, WhisperXSegment } from './alignment';
+import { transcribeWithWhisperX, transcribeWithWhisperXRobust, WhisperXSegment } from './alignment';
 import {
   recordMetrics,
   calculateCost,
@@ -183,6 +183,129 @@ interface SpeakerCorrection {
 }
 
 /**
+ * Fallback transcription using Gemini when WhisperX fails.
+ * Uses Gemini's audio understanding capabilities for transcription.
+ * Note: Timestamps are approximate (Gemini estimates, not word-level).
+ */
+async function transcribeWithGeminiFallback(
+  audioBuffer: Buffer,
+  apiKey: string
+): Promise<{ segments: WhisperXSegment[]; status: 'success' | 'error'; error?: string; usedFallback?: boolean }> {
+  console.log('[Gemini Fallback] Starting transcription...');
+
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+
+    // Use gemini-2.5-flash for transcription (supports audio)
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: SchemaType.OBJECT,
+          properties: {
+            segments: {
+              type: SchemaType.ARRAY,
+              items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  text: { type: SchemaType.STRING },
+                  startSeconds: { type: SchemaType.NUMBER },
+                  endSeconds: { type: SchemaType.NUMBER },
+                  speaker: { type: SchemaType.STRING }
+                },
+                required: ['text', 'startSeconds', 'endSeconds']
+              }
+            }
+          },
+          required: ['segments']
+        }
+      }
+    });
+
+    // Convert audio to base64 for Gemini
+    const audioBase64 = audioBuffer.toString('base64');
+
+    // Detect MIME type from buffer (simplified - assume common formats)
+    let mimeType = 'audio/mpeg'; // Default
+    if (audioBuffer[0] === 0x52 && audioBuffer[1] === 0x49) { // RIFF header
+      mimeType = 'audio/wav';
+    } else if (audioBuffer[0] === 0x4F && audioBuffer[1] === 0x67) { // OggS
+      mimeType = 'audio/ogg';
+    }
+
+    const prompt = `
+Transcribe this audio file into segments. For each segment, provide:
+- The spoken text
+- Approximate start time in seconds
+- Approximate end time in seconds
+- Speaker label if you can identify different speakers (use "SPEAKER_00", "SPEAKER_01", etc.)
+
+Focus on accuracy of the transcription. Timestamps should be your best estimate.
+Group related sentences into segments (typically 1-4 sentences per segment).
+If you detect multiple speakers, assign consistent speaker labels throughout.
+
+Return as JSON with a "segments" array.
+`;
+
+    console.log('[Gemini Fallback] Sending audio to Gemini...');
+    const startTime = Date.now();
+
+    const result = await model.generateContent([
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType,
+          data: audioBase64
+        }
+      }
+    ]);
+
+    const durationMs = Date.now() - startTime;
+    const responseText = result.response.text();
+
+    console.log(`[Gemini Fallback] Response received in ${(durationMs / 1000).toFixed(1)}s`);
+
+    // Parse the response
+    const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+    const parsed = JSON.parse(cleanJson) as {
+      segments: Array<{
+        text: string;
+        startSeconds: number;
+        endSeconds: number;
+        speaker?: string;
+      }>;
+    };
+
+    // Convert to WhisperXSegment format
+    const segments: WhisperXSegment[] = parsed.segments.map(seg => ({
+      text: seg.text,
+      start: seg.startSeconds,
+      end: seg.endSeconds,
+      speaker: seg.speaker
+    }));
+
+    console.log(`[Gemini Fallback] ✅ Transcribed ${segments.length} segments`);
+
+    return {
+      segments,
+      status: 'success',
+      usedFallback: true
+    };
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[Gemini Fallback] ❌ Transcription failed: ${errorMsg}`);
+
+    return {
+      segments: [],
+      status: 'error',
+      error: `Gemini transcription failed: ${errorMsg}`
+    };
+  }
+}
+
+/**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
  */
@@ -302,7 +425,7 @@ export const transcribeAudio = onObjectFinalized(
       // Check for abort after download
       await checkAbort(conversationId);
 
-      // === NEW ARCHITECTURE: WhisperX-first transcription ===
+      // === NEW ARCHITECTURE: WhisperX-first transcription with Gemini fallback ===
       // Step 1: Get transcript + timestamps from WhisperX
       console.log('[Transcribe] Step 1: Calling WhisperX for transcription...');
       const whisperxStartTime = Date.now();
@@ -313,17 +436,48 @@ export const transcribeAudio = onObjectFinalized(
         console.warn('[Transcribe] HUGGINGFACE_ACCESS_TOKEN not set - speaker diarization will be disabled');
       }
 
-      const whisperxResult = await transcribeWithWhisperX(
+      // Try robust WhisperX first (handles large responses better)
+      let whisperxResult = await transcribeWithWhisperXRobust(
         audioBuffer,
         replicateApiToken.value(),
-        hfToken || undefined  // Pass undefined if empty to trigger warning
+        hfToken || undefined
       );
+
+      // If robust method failed, try standard method as backup
+      if (whisperxResult.status === 'error') {
+        console.warn('[Transcribe] Robust WhisperX failed, trying standard method...');
+        whisperxResult = await transcribeWithWhisperX(
+          audioBuffer,
+          replicateApiToken.value(),
+          hfToken || undefined
+        );
+      }
 
       const whisperxDurationMs = Date.now() - whisperxStartTime;
 
+      // If WhisperX completely failed, fall back to Gemini transcription
       if (whisperxResult.status === 'error') {
-        throw new Error(`WhisperX failed: ${whisperxResult.error}`);
+        console.warn('[Transcribe] WhisperX failed completely, falling back to Gemini transcription...');
+
+        const geminiTranscriptResult = await transcribeWithGeminiFallback(
+          audioBuffer,
+          geminiApiKey.value()
+        );
+
+        if (geminiTranscriptResult.status === 'error') {
+          throw new Error(`Both WhisperX and Gemini transcription failed. WhisperX: ${whisperxResult.error}. Gemini: ${geminiTranscriptResult.error}`);
+        }
+
+        // Use Gemini result with fallback alignment status
+        whisperxResult = geminiTranscriptResult;
+        console.log('[Transcribe] Using Gemini transcription as fallback (timestamps may be approximate)');
+
+        // Update progress to note fallback
+        await progressManager.setStep(ProcessingStep.ANALYZING);
       }
+
+      // Track if we used the Gemini fallback for alignment status
+      const usedGeminiFallback = 'usedFallback' in whisperxResult && whisperxResult.usedFallback === true;
 
       console.log('[Transcribe] WhisperX transcription complete:', {
         conversationId,
@@ -469,6 +623,9 @@ export const transcribeAudio = onObjectFinalized(
       // Check for abort before final save
       await checkAbort(conversationId);
 
+      // Determine alignment status based on transcription source
+      const finalAlignmentStatus = usedGeminiFallback ? 'fallback' : 'aligned';
+
       // Save results to Firestore (with retry for transient failures)
       console.debug('[Transcribe] Saving results to Firestore...');
       const firestoreStartTime = Date.now();
@@ -476,8 +633,8 @@ export const transcribeAudio = onObjectFinalized(
         () => db.collection('conversations').doc(conversationId).update({
           ...processedData,
           status: 'complete',
-          alignmentStatus: 'aligned',  // Always aligned since WhisperX is the source
-          alignmentError: null,
+          alignmentStatus: finalAlignmentStatus,
+          alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
           abortRequested: false,  // Clear any abort flag
           audioStoragePath: filePath,
           updatedAt: FieldValue.serverTimestamp()
@@ -494,7 +651,8 @@ export const transcribeAudio = onObjectFinalized(
         termCount: Object.keys(processedData.terms).length,
         topicCount: processedData.topics.length,
         personCount: processedData.people.length,
-        alignmentStatus: 'aligned',
+        alignmentStatus: finalAlignmentStatus,
+        usedGeminiFallback,
         speakerCorrectionsApplied: speakerCorrections.length,
         timingMs: {
           download: downloadDurationMs,
@@ -537,7 +695,7 @@ export const transcribeAudio = onObjectFinalized(
         conversationId,
         userId,
         status: 'success',
-        alignmentStatus: 'aligned',
+        alignmentStatus: finalAlignmentStatus,
         timingMs: {
           download: downloadDurationMs,
           whisperx: whisperxDurationMs,
@@ -698,6 +856,10 @@ export const transcribeAudio = onObjectFinalized(
 
 /**
  * NEW: Build segments from WhisperX output
+ *
+ * IMPORTANT: WhisperX (rafaelgalle/whisper-diarization-advanced) returns WORD-LEVEL
+ * segments, not sentence-level. We must group consecutive words by speaker into
+ * proper sentence-level segments for a usable transcript.
  */
 function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>;
@@ -722,12 +884,25 @@ function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
     speakers.push({ id: 'SPEAKER_00', name: 'Speaker 1' });
   }
 
-  // Build segments with timestamps in milliseconds
+  // Check if we have word-level segments (typical for whisper-diarization-advanced)
+  // Word-level: many short segments with single words
+  // Sentence-level: fewer segments with multiple words
+  const avgWordsPerSegment = whisperxSegments.reduce((sum, seg) =>
+    sum + seg.text.split(/\s+/).length, 0) / Math.max(whisperxSegments.length, 1);
+
+  const isWordLevel = avgWordsPerSegment < 2;
+
+  if (isWordLevel) {
+    console.log('[BuildSegments] Detected WORD-LEVEL output, grouping into sentences...');
+    return groupWordSegmentsBySpeaker(whisperxSegments, speakers);
+  }
+
+  // Sentence-level output - use as-is
   const segments = whisperxSegments.map((seg, idx) => ({
     text: seg.text,
     startMs: Math.floor(seg.start * 1000),
     endMs: Math.floor(seg.end * 1000),
-    speakerId: seg.speaker || 'SPEAKER_00',  // Default if no diarization
+    speakerId: seg.speaker || 'SPEAKER_00',
     index: idx
   }));
 
@@ -738,6 +913,111 @@ function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
   });
 
   return { segments, speakers };
+}
+
+/**
+ * Group word-level segments into sentence-level segments by speaker.
+ *
+ * Strategy:
+ * 1. Group consecutive words with the same speaker
+ * 2. Split at natural sentence boundaries (., !, ?) when they occur
+ * 3. Also split if a segment gets too long (prevents giant monologue segments)
+ */
+function groupWordSegmentsBySpeaker(
+  wordSegments: WhisperXSegment[],
+  speakers: Array<{ id: string; name: string }>
+): {
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>;
+  speakers: Array<{ id: string; name: string }>;
+} {
+  if (wordSegments.length === 0) {
+    return { segments: [], speakers };
+  }
+
+  const MAX_SEGMENT_WORDS = 50;  // Split long monologues at ~50 words
+  const MIN_SEGMENT_WORDS = 3;   // Minimum words before allowing sentence-end split
+
+  const groupedSegments: Array<{
+    text: string;
+    startMs: number;
+    endMs: number;
+    speakerId: string;
+    index: number;
+  }> = [];
+
+  let currentWords: string[] = [];
+  let currentSpeaker = wordSegments[0].speaker || 'SPEAKER_00';
+  let currentStartMs = Math.floor(wordSegments[0].start * 1000);
+  let currentEndMs = Math.floor(wordSegments[0].end * 1000);
+
+  const finishCurrentSegment = () => {
+    if (currentWords.length > 0) {
+      groupedSegments.push({
+        text: currentWords.join(' '),
+        startMs: currentStartMs,
+        endMs: currentEndMs,
+        speakerId: currentSpeaker,
+        index: groupedSegments.length
+      });
+      currentWords = [];
+    }
+  };
+
+  for (let i = 0; i < wordSegments.length; i++) {
+    const word = wordSegments[i];
+    const wordSpeaker = word.speaker || 'SPEAKER_00';
+    const wordText = word.text.trim();
+    const wordEndMs = Math.floor(word.end * 1000);
+
+    // Speaker change - finish current segment
+    if (wordSpeaker !== currentSpeaker) {
+      finishCurrentSegment();
+      currentSpeaker = wordSpeaker;
+      currentStartMs = Math.floor(word.start * 1000);
+    }
+
+    // Add word to current segment
+    currentWords.push(wordText);
+    currentEndMs = wordEndMs;
+
+    // Check if we should split the segment
+    const shouldSplitAtSentence = currentWords.length >= MIN_SEGMENT_WORDS &&
+      /[.!?]$/.test(wordText);
+    const shouldSplitAtLength = currentWords.length >= MAX_SEGMENT_WORDS;
+
+    if (shouldSplitAtSentence || shouldSplitAtLength) {
+      finishCurrentSegment();
+      // Next word will start a new segment
+      if (i + 1 < wordSegments.length) {
+        currentStartMs = Math.floor(wordSegments[i + 1].start * 1000);
+      }
+    }
+  }
+
+  // Don't forget the last segment
+  finishCurrentSegment();
+
+  // Re-index all segments
+  groupedSegments.forEach((seg, idx) => {
+    seg.index = idx;
+  });
+
+  console.log('[BuildSegments] Grouped word-level segments:', {
+    inputWordCount: wordSegments.length,
+    outputSegmentCount: groupedSegments.length,
+    compressionRatio: (wordSegments.length / Math.max(groupedSegments.length, 1)).toFixed(1),
+    speakerCount: speakers.length,
+    speakers: speakers.map(s => s.id).join(', ')
+  });
+
+  // Log speaker distribution for debugging
+  const speakerCounts: Record<string, number> = {};
+  groupedSegments.forEach(seg => {
+    speakerCounts[seg.speakerId] = (speakerCounts[seg.speakerId] || 0) + 1;
+  });
+  console.debug('[BuildSegments] Speaker distribution:', speakerCounts);
+
+  return { segments: groupedSegments, speakers };
 }
 
 /**

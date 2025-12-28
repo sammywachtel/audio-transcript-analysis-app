@@ -29,7 +29,9 @@ interface UserStatsProps {
 export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
   const { user } = useAuth();
   const { data: stats, loading: statsLoading, error: statsError, refetch } = useMyStats();
+  // Always pass user ID - even for admins, "My Usage Stats" shows their own stats
   const { data: recentMetrics, loading: metricsLoading } = useRecentMetrics({
+    userId: user?.uid,
     maxResults: 20
   });
 
