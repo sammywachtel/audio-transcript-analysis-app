@@ -386,6 +386,7 @@ The service account needs these roles in [Google Cloud IAM](https://console.clou
 |------|---------|
 | **Firebase Rules Admin** | Deploy Firestore and Storage security rules |
 | **Cloud Functions Admin** | Deploy Cloud Functions |
+| **Cloud Scheduler Admin** | Manage scheduled functions (daily stats, etc.) |
 | **Service Account User** | Allow functions to run as service account |
 | **Cloud Datastore User** | Read/write Firestore data |
 | **Storage Admin** | Manage Firebase Storage |
@@ -402,6 +403,7 @@ SA_EMAIL="firebase-adminsdk-xxxxx@${PROJECT_ID}.iam.gserviceaccount.com"
 for ROLE in \
   roles/firebaserules.admin \
   roles/cloudfunctions.admin \
+  roles/cloudscheduler.admin \
   roles/iam.serviceAccountUser \
   roles/datastore.user \
   roles/storage.admin \
@@ -427,6 +429,10 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
   --role="roles/cloudfunctions.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="roles/cloudscheduler.admin"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_EMAIL" \
