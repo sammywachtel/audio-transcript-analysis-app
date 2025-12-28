@@ -22,7 +22,8 @@ export type UserEventType =
   | 'conversation_created'
   | 'conversation_deleted'
   | 'processing_completed'
-  | 'processing_failed';
+  | 'processing_failed'
+  | 'processing_aborted';
 
 /**
  * A single user activity event
@@ -245,6 +246,20 @@ function applyEventToStats(
       stats.lifetime.jobsFailed++;
       stats.last7Days.jobsFailed++;
       stats.last30Days.jobsFailed++;
+      break;
+
+    case 'processing_aborted':
+      // Aborted counts as failed for job stats (user cancelled)
+      stats.lifetime.jobsFailed++;
+      stats.last7Days.jobsFailed++;
+      stats.last30Days.jobsFailed++;
+
+      // Still track any costs incurred before abort
+      if (metadata?.estimatedCostUsd && typeof metadata.estimatedCostUsd === 'number') {
+        stats.lifetime.estimatedCostUsd += metadata.estimatedCostUsd;
+        stats.last7Days.estimatedCostUsd += metadata.estimatedCostUsd;
+        stats.last30Days.estimatedCostUsd += metadata.estimatedCostUsd;
+      }
       break;
   }
 }

@@ -3,10 +3,11 @@ import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3 } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3, StopCircle } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
+import { firestoreService } from '../services/firestoreService';
 
 interface LibraryProps {
   onOpen: (id: string) => void;
@@ -23,6 +24,21 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this conversation?')) {
       deleteConversation(id);
+    }
+  };
+
+  const handleAbort = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (confirm('Are you sure you want to cancel this processing job? Partial costs may still be incurred.')) {
+      try {
+        const success = await firestoreService.abortProcessing(id);
+        if (!success) {
+          alert('Could not abort - conversation may no longer be processing.');
+        }
+      } catch (error) {
+        console.error('Failed to abort processing:', error);
+        alert('Failed to abort processing. Please try again.');
+      }
     }
   };
 
@@ -130,7 +146,9 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                   conversations.map(conv => {
                     const isProcessing = conv.status === 'processing';
                     const isFailed = conv.status === 'failed';
+                    const isAborted = conv.status === 'aborted';
                     const isComplete = conv.status === 'complete';
+                    const isErrorState = isFailed || isAborted;
 
                     return (
                     <div
@@ -147,12 +165,12 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                             <div className={cn(
                               "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
                               isProcessing ? "bg-blue-100 text-blue-600" :
-                              isFailed ? "bg-red-100 text-red-600" :
+                              isErrorState ? "bg-red-100 text-red-600" :
                               "bg-emerald-100 text-emerald-600"
                             )}>
                                 {isProcessing ? (
                                   <Loader2 size={20} className="animate-spin" />
-                                ) : isFailed ? (
+                                ) : isErrorState ? (
                                   <AlertCircle size={20} />
                                 ) : (
                                   <FileAudio size={20} />
@@ -169,6 +187,10 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                                   <div className="mt-1">
                                     <ProcessingProgress progress={conv.processingProgress} compact />
                                   </div>
+                                ) : isAborted ? (
+                                  <p className="text-xs text-red-600">
+                                    Cancelled by user
+                                  </p>
                                 ) : isFailed ? (
                                   <p className="text-xs text-red-600">
                                     Processing failed
@@ -201,14 +223,25 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                               "px-2.5 py-0.5 rounded-full text-xs font-medium",
                               isComplete ? "bg-emerald-100 text-emerald-700" :
                               isProcessing ? "bg-blue-100 text-blue-700" :
+                              isAborted ? "bg-amber-100 text-amber-700" :
                               "bg-red-100 text-red-700"
                             )}>
-                                {isProcessing ? 'Processing...' : conv.status}
+                                {isProcessing ? 'Processing...' : isAborted ? 'Cancelled' : conv.status}
                             </span>
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
-                             {/* Delete button for completed and failed conversations */}
-                             {(isComplete || isFailed) && (
+                             {/* Abort button for processing conversations */}
+                             {isProcessing && (
+                               <button
+                                  onClick={(e) => handleAbort(e, conv.conversationId)}
+                                  className="p-2 text-amber-500 hover:text-amber-700 hover:bg-amber-50 rounded transition-colors"
+                                  title="Cancel processing"
+                               >
+                                  <StopCircle size={16} />
+                               </button>
+                             )}
+                             {/* Delete button for completed, failed, and aborted conversations */}
+                             {(isComplete || isErrorState) && (
                                <button
                                   onClick={(e) => handleDelete(e, conv.conversationId)}
                                   className={cn(

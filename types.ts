@@ -53,7 +53,8 @@ export interface Conversation {
   updatedAt: string; // For sync conflict resolution and tracking
   durationMs: number;
   audioUrl?: string; // Added field for real audio playback
-  status: 'processing' | 'needs_review' | 'complete' | 'failed';
+  status: 'processing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
+  abortRequested?: boolean;  // Set to true to request abort, Cloud Function checks this
   speakers: Record<string, Speaker>;
   segments: Segment[];
   terms: Record<string, Term>;

@@ -162,6 +162,34 @@ export class FirestoreService {
   }
 
   /**
+   * Request abort for a processing conversation
+   * Sets abortRequested flag which Cloud Function checks at each checkpoint.
+   * Returns true if abort was requested, false if conversation wasn't processing.
+   */
+  async abortProcessing(conversationId: string): Promise<boolean> {
+    const docRef = doc(db, this.conversationsCollection, conversationId);
+    const docSnap = await getDoc(docRef);
+
+    if (!docSnap.exists()) {
+      console.warn('[Firestore] Cannot abort - conversation not found:', conversationId);
+      return false;
+    }
+
+    const data = docSnap.data() as ConversationDoc;
+    if (data.status !== 'processing') {
+      console.warn('[Firestore] Cannot abort - not processing:', {
+        conversationId,
+        currentStatus: data.status
+      });
+      return false;
+    }
+
+    console.log('[Firestore] Requesting abort for conversation:', conversationId);
+    await setDoc(docRef, { abortRequested: true }, { merge: true });
+    return true;
+  }
+
+  /**
    * Update specific fields of a conversation
    * More efficient than save() when only changing a few fields
    */
