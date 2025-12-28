@@ -352,6 +352,7 @@ log_info "Deployment SA: $SA_EMAIL"
 # Deployment service account roles
 DEPLOYMENT_ROLES=(
     "roles/cloudfunctions.admin"
+    "roles/cloudscheduler.admin"  # Required for scheduled functions
     "roles/firebaserules.admin"
     "roles/firebase.admin"
     "roles/storage.admin"

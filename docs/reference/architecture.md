@@ -642,7 +642,7 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
 
 | Service Account | Purpose | Key Roles |
 |-----------------|---------|-----------|
-| `firebase-adminsdk-*@PROJECT.iam.gserviceaccount.com` | CI/CD deployment | Cloud Functions Admin, Secret Manager Admin, Firebase Admin |
+| `firebase-adminsdk-*@PROJECT.iam.gserviceaccount.com` | CI/CD deployment | Cloud Functions Admin, Cloud Scheduler Admin, Secret Manager Admin, Firebase Admin |
 | `PROJECT@appspot.gserviceaccount.com` | Cloud Functions runtime | Secret Manager Secret Accessor (auto-granted) |
 
 #### Google-Managed Service Agents
@@ -669,6 +669,7 @@ These are automatically created and managed by Google Cloud:
 │                    firebase-adminsdk-* SA                         │
 ├───────────────────────────────────────────────────────────────────┤
 │  roles/cloudfunctions.admin    → deploy functions                 │
+│  roles/cloudscheduler.admin    → manage scheduled functions       │
 │  roles/firebaserules.admin     → deploy security rules            │
 │  roles/firebase.admin          → Firebase Extensions API          │
 │  roles/storage.admin           → manage Storage                   │
