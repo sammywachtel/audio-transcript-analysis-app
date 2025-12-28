@@ -893,6 +893,28 @@ function buildSegmentsFromWhisperX(whisperxSegments: WhisperXSegment[]): {
   const isWordLevel = avgWordsPerSegment < 2;
 
   if (isWordLevel) {
+    // Check if diarization is broken (near 50/50 speaker split = alternating speakers)
+    const speakerWordCounts: Record<string, number> = {};
+    whisperxSegments.forEach(seg => {
+      const spk = seg.speaker || 'SPEAKER_00';
+      speakerWordCounts[spk] = (speakerWordCounts[spk] || 0) + 1;
+    });
+
+    const speakerCounts = Object.values(speakerWordCounts);
+    const totalWords = speakerCounts.reduce((a, b) => a + b, 0);
+    const maxSpeakerRatio = Math.max(...speakerCounts) / totalWords;
+
+    // If the dominant speaker has less than 60% of words, diarization is likely broken
+    // (real conversations rarely have exactly equal speaker time at the word level)
+    const isDiarizationBroken = speakers.length >= 2 && maxSpeakerRatio < 0.6;
+
+    if (isDiarizationBroken) {
+      console.log('[BuildSegments] Detected BROKEN diarization (near 50/50 split on word-level)');
+      console.log(`[BuildSegments] Speaker distribution: ${JSON.stringify(speakerWordCounts)}`);
+      console.log('[BuildSegments] Grouping by sentence boundaries ONLY, ignoring speaker assignments');
+      return groupWordSegmentsIgnoringSpeaker(whisperxSegments, speakers);
+    }
+
     console.log('[BuildSegments] Detected WORD-LEVEL output, grouping into sentences...');
     return groupWordSegmentsBySpeaker(whisperxSegments, speakers);
   }
@@ -1016,6 +1038,97 @@ function groupWordSegmentsBySpeaker(
     speakerCounts[seg.speakerId] = (speakerCounts[seg.speakerId] || 0) + 1;
   });
   console.debug('[BuildSegments] Speaker distribution:', speakerCounts);
+
+  return { segments: groupedSegments, speakers };
+}
+
+/**
+ * Group word-level segments into sentences IGNORING speaker assignments.
+ *
+ * Used when WhisperX diarization is broken (e.g., alternating speakers on every word).
+ * Groups purely by sentence boundaries, assigns all segments to SPEAKER_00,
+ * and lets the speaker reassignment step (Gemini) assign proper speakers later.
+ */
+function groupWordSegmentsIgnoringSpeaker(
+  wordSegments: WhisperXSegment[],
+  speakers: Array<{ id: string; name: string }>
+): {
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>;
+  speakers: Array<{ id: string; name: string }>;
+} {
+  if (wordSegments.length === 0) {
+    return { segments: [], speakers };
+  }
+
+  const MAX_SEGMENT_WORDS = 50;  // Split long segments at ~50 words
+  const MIN_SEGMENT_WORDS = 3;   // Minimum words before allowing sentence-end split
+
+  const groupedSegments: Array<{
+    text: string;
+    startMs: number;
+    endMs: number;
+    speakerId: string;
+    index: number;
+  }> = [];
+
+  let currentWords: string[] = [];
+  let currentStartMs = Math.floor(wordSegments[0].start * 1000);
+  let currentEndMs = Math.floor(wordSegments[0].end * 1000);
+
+  // Use first speaker as default - Gemini reassignment will fix it
+  const defaultSpeaker = speakers[0]?.id || 'SPEAKER_00';
+
+  const finishCurrentSegment = () => {
+    if (currentWords.length > 0) {
+      groupedSegments.push({
+        text: currentWords.join(' '),
+        startMs: currentStartMs,
+        endMs: currentEndMs,
+        speakerId: defaultSpeaker,  // Will be reassigned by Gemini
+        index: groupedSegments.length
+      });
+      currentWords = [];
+    }
+  };
+
+  for (let i = 0; i < wordSegments.length; i++) {
+    const word = wordSegments[i];
+    const wordText = word.text.trim();
+    const wordEndMs = Math.floor(word.end * 1000);
+
+    // If this is the first word of a new segment, set start time
+    if (currentWords.length === 0) {
+      currentStartMs = Math.floor(word.start * 1000);
+    }
+
+    // Add word to current segment
+    currentWords.push(wordText);
+    currentEndMs = wordEndMs;
+
+    // Check if we should split the segment (sentence boundary or max length)
+    const shouldSplitAtSentence = currentWords.length >= MIN_SEGMENT_WORDS &&
+      /[.!?]$/.test(wordText);
+    const shouldSplitAtLength = currentWords.length >= MAX_SEGMENT_WORDS;
+
+    if (shouldSplitAtSentence || shouldSplitAtLength) {
+      finishCurrentSegment();
+    }
+  }
+
+  // Don't forget the last segment
+  finishCurrentSegment();
+
+  // Re-index all segments
+  groupedSegments.forEach((seg, idx) => {
+    seg.index = idx;
+  });
+
+  console.log('[BuildSegments] Grouped word-level segments (ignoring broken diarization):', {
+    inputWordCount: wordSegments.length,
+    outputSegmentCount: groupedSegments.length,
+    compressionRatio: (wordSegments.length / Math.max(groupedSegments.length, 1)).toFixed(1),
+    note: 'All segments assigned to default speaker - Gemini will reassign'
+  });
 
   return { segments: groupedSegments, speakers };
 }
