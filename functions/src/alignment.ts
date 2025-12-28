@@ -15,9 +15,9 @@
 import Replicate from 'replicate';
 import fuzz from 'fuzzball';
 
-// Whisper diarization model on Replicate - provides word-level timestamps + speaker diarization
-// Using rafaelgalle/whisper-diarization-advanced: stable, recently updated, good for multi-speaker audio
-const WHISPERX_MODEL = 'rafaelgalle/whisper-diarization-advanced:56dcb55b658e0cb096d663aca0c44bac1466f3acf4304f8ff35af555dc43c9c9';
+// Whisper diarization model on Replicate - provides word/sentence-level timestamps + speaker diarization
+// Using thomasmol/whisper-diarization: Whisper Large V3 Turbo, better diarization, groups segments by speaker
+const WHISPERX_MODEL = 'thomasmol/whisper-diarization:1495a9cddc83b2203b0d8d3516e38b80fd1572ebc4bc5700ac1da56a9b3ed886';
 
 // =============================================================================
 // Configuration
