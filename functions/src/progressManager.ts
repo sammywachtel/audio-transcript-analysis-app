@@ -25,12 +25,64 @@ const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
   [ProcessingStep.FAILED]: 0
 };
 
+// Step metadata interface
+export interface StepMeta {
+  label: string;
+  description?: string;
+  category: 'pending' | 'active' | 'success' | 'error';
+}
+
+// Self-describing metadata for each processing step
+const STEP_META: Record<ProcessingStep, StepMeta> = {
+  [ProcessingStep.PENDING]: {
+    label: 'Pending',
+    description: 'Waiting to start processing',
+    category: 'pending'
+  },
+  [ProcessingStep.UPLOADING]: {
+    label: 'Uploading',
+    description: 'Uploading audio file to storage',
+    category: 'active'
+  },
+  [ProcessingStep.TRANSCRIBING]: {
+    label: 'Transcribing',
+    description: 'Converting speech to text with speaker diarization',
+    category: 'active'
+  },
+  [ProcessingStep.ANALYZING]: {
+    label: 'Analyzing',
+    description: 'Extracting topics, terms, and detecting people mentioned',
+    category: 'active'
+  },
+  [ProcessingStep.ALIGNING]: {
+    label: 'Aligning',
+    description: 'Synchronizing timestamps with precise word-level timing',
+    category: 'active'
+  },
+  [ProcessingStep.FINALIZING]: {
+    label: 'Finalizing',
+    description: 'Saving results and cleaning up',
+    category: 'active'
+  },
+  [ProcessingStep.COMPLETE]: {
+    label: 'Complete',
+    description: 'Processing finished successfully',
+    category: 'success'
+  },
+  [ProcessingStep.FAILED]: {
+    label: 'Failed',
+    description: 'Processing encountered an error',
+    category: 'error'
+  }
+};
+
 export interface ProcessingProgress {
   currentStep: ProcessingStep;
   percentComplete: number;
   stepStartedAt?: FirebaseFirestore.Timestamp;
   estimatedRemainingMs?: number;
   errorMessage?: string;
+  stepMeta?: StepMeta;
 }
 
 export interface ProcessingTimeline {
@@ -78,11 +130,17 @@ export class ProgressManager {
     this.timeline.push(timelineEntry);
     this.currentStepStartTime = now;
 
-    // Build progress object
+    // Build progress object with self-describing metadata
+    const baseMeta = STEP_META[step];
+    const stepMeta: StepMeta = errorMessage
+      ? { ...baseMeta, category: 'error' } // Override category to 'error' when error present
+      : baseMeta;
+
     const progress: ProcessingProgress = {
       currentStep: step,
       percentComplete: STEP_PERCENTAGES[step],
-      stepStartedAt: FieldValue.serverTimestamp() as any
+      stepStartedAt: FieldValue.serverTimestamp() as any,
+      stepMeta
     };
 
     if (errorMessage) {
