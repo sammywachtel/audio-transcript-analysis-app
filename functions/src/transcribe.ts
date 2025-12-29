@@ -857,6 +857,40 @@ export const transcribeAudio = onObjectFinalized(
       // Check for abort after Gemini analysis
       await checkAbort(conversationId);
 
+      // Step 3.4: Content-based speaker identification (runs AFTER WhisperX)
+      // This identifies which SPEAKER_XX is which person based on the actual transcript content
+      console.log('[Transcribe] Step 3.4: Identifying speakers from transcript content...');
+      const speakerIdStartTime = Date.now();
+
+      const speakerIdentificationResult = await identifySpeakersFromContent(
+        whisperxSegments.segments,
+        whisperxSegments.speakers,
+        geminiApiKey.value()
+      );
+
+      const speakerIdDurationMs = Date.now() - speakerIdStartTime;
+      console.log('[Transcribe] Content-based speaker identification complete:', {
+        conversationId,
+        durationMs: speakerIdDurationMs,
+        durationSec: (speakerIdDurationMs / 1000).toFixed(1),
+        speakerNotesFound: speakerIdentificationResult.speakerNotes?.length ?? 0,
+        inputTokens: speakerIdentificationResult.tokenUsage.inputTokens,
+        outputTokens: speakerIdentificationResult.tokenUsage.outputTokens
+      });
+
+      // Override analysis.speakerNotes with content-based identification
+      // This ensures merge uses the CORRECT SPEAKER_XX -> name mapping
+      if (speakerIdentificationResult.speakerNotes && speakerIdentificationResult.speakerNotes.length > 0) {
+        analysis.speakerNotes = speakerIdentificationResult.speakerNotes;
+        console.log('[Transcribe] Using content-based speaker identification (overriding pre-analysis)');
+      } else {
+        console.warn('[Transcribe] Content-based identification returned no speaker notes, using pre-analysis fallback');
+      }
+
+      // Update metrics for speaker identification
+      partialMetrics.llmUsage.geminiAnalysis.inputTokens += speakerIdentificationResult.tokenUsage.inputTokens;
+      partialMetrics.llmUsage.geminiAnalysis.outputTokens += speakerIdentificationResult.tokenUsage.outputTokens;
+
       // Step 3.5: Speaker reassignment pass (reassign only, no splits/timestamp changes)
       await progressManager.setStep(ProcessingStep.REASSIGNING);
       console.log('[Transcribe] Step 3.5: Identifying speaker reassignments...');
@@ -1787,6 +1821,159 @@ Return your analysis as JSON matching the provided schema.
 }
 
 /**
+ * Identify speakers from transcript content (runs AFTER WhisperX).
+ *
+ * This solves the speaker label reversal problem:
+ * - Pre-analysis assigns SPEAKER_00/01 arbitrarily (before WhisperX)
+ * - WhisperX assigns SPEAKER_00/01 based on acoustic features
+ * - These don't match! Pre-analysis might say SPEAKER_00="Feynman" but WhisperX
+ *   assigns SPEAKER_00 to the interviewer based on voice characteristics.
+ *
+ * This function sees the ACTUAL transcript with WhisperX's SPEAKER_XX labels
+ * and identifies which speaker is which based on content (who introduces themselves,
+ * who asks questions vs answers, etc.).
+ *
+ * Returns speaker notes with CORRECT SPEAKER_XX -> name mapping.
+ */
+async function identifySpeakersFromContent(
+  segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
+  speakers: Array<{ id: string; name: string }>,
+  apiKey: string
+): Promise<{ speakerNotes: GeminiAnalysis['speakerNotes']; tokenUsage: GeminiUsage }> {
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  // Use gemini-2.5-flash for speaker identification
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: SchemaType.OBJECT,
+        properties: {
+          speakerNotes: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                speakerId: { type: SchemaType.STRING },
+                inferredName: { type: SchemaType.STRING },
+                role: { type: SchemaType.STRING },
+                notes: { type: SchemaType.STRING }
+              },
+              required: ['speakerId']
+            }
+          }
+        },
+        required: ['speakerNotes']
+      }
+    }
+  });
+
+  // Format transcript with actual SPEAKER_XX labels from WhisperX
+  const formattedTranscript = segments.map((seg, idx) => {
+    return `[${idx}] ${seg.speakerId}: ${seg.text}`;
+  }).join('\n\n');
+
+  const speakerList = speakers.map(s => s.id).join(', ');
+
+  // Calculate speaker distribution to help identify dominant/guest speakers
+  const speakerCounts: Record<string, number> = {};
+  segments.forEach(seg => {
+    speakerCounts[seg.speakerId] = (speakerCounts[seg.speakerId] || 0) + 1;
+  });
+  const speakerDistribution = Object.entries(speakerCounts)
+    .map(([id, count]) => `${id}: ${count} segments (${Math.round(count / segments.length * 100)}%)`)
+    .join(', ');
+
+  const prompt = `
+You are analyzing a conversation transcript to identify which speaker is which person.
+
+The transcript has these speakers (from voice recognition): ${speakerList}
+Speaker distribution: ${speakerDistribution}
+
+Your task: For each speaker, identify:
+1. inferredName: Their actual name if they introduce themselves OR another speaker addresses them by name
+   - Examples: "Hi, I'm John", "This is Sarah", "My name is...", "Thanks, Bill"
+   - ONLY set this if you have HIGH CONFIDENCE from explicit introduction or direct address
+   - Leave blank if no clear name identification
+
+2. role: Their role in the conversation
+   - Common roles: "host", "guest", "interviewer", "interviewee", "expert", "moderator"
+   - Base this on conversational patterns (who asks vs answers, who dominates, etc.)
+
+3. notes: Additional context if relevant
+   - Examples: "works at Google", "PhD in physics", "asks most questions"
+
+IMPORTANT GUIDELINES:
+- The SPEAKER_XX labels are from voice recognition and are INDEPENDENT of any names
+- A speaker with 85%+ of segments is likely the guest/interviewee/expert
+- A speaker with <20% of segments is likely the host/interviewer
+- Don't guess names - only use them if explicitly stated in the transcript
+- Interview pattern: interviewer asks questions, interviewee gives long answers
+
+Available speakers: ${speakerList}
+
+Transcript (with actual SPEAKER_XX labels from voice recognition):
+${formattedTranscript}
+
+Return JSON with speakerNotes array containing one entry per speaker.
+Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role, notes (optional).
+`;
+
+  console.log('[Speaker Identification] Analyzing transcript for speaker identification...', {
+    promptLength: prompt.length,
+    segmentCount: segments.length,
+    speakerCount: speakers.length,
+    speakerDistribution
+  });
+
+  const result = await model.generateContent([{ text: prompt }]);
+  const responseText = result.response.text();
+
+  // Extract token usage for cost tracking
+  const usageMetadata = result.response.usageMetadata;
+  const tokenUsage: GeminiUsage = {
+    inputTokens: usageMetadata?.promptTokenCount ?? 0,
+    outputTokens: usageMetadata?.candidatesTokenCount ?? 0,
+    model: 'gemini-2.5-flash'
+  };
+
+  console.debug('[Speaker Identification] Raw response received:', {
+    responseLength: responseText.length,
+    inputTokens: tokenUsage.inputTokens,
+    outputTokens: tokenUsage.outputTokens
+  });
+
+  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+
+  try {
+    const parsed = JSON.parse(cleanJson) as { speakerNotes: GeminiAnalysis['speakerNotes'] };
+
+    console.log('[Speaker Identification] Analysis complete:', {
+      speakerNotesCount: parsed.speakerNotes?.length ?? 0,
+      speakerNotes: parsed.speakerNotes?.map(n =>
+        `${n.speakerId}: ${n.inferredName || 'unknown'} (${n.role || 'no role'})`
+      )
+    });
+
+    return {
+      speakerNotes: parsed.speakerNotes,
+      tokenUsage
+    };
+  } catch (parseError) {
+    console.error('[Speaker Identification] JSON parse failed:', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+      cleanJsonPreview: cleanJson.substring(0, 500)
+    });
+    // Return empty speaker notes on parse failure - will fall back to pre-analysis
+    return {
+      speakerNotes: [],
+      tokenUsage
+    };
+  }
+}
+
+/**
  * Identify speaker corrections using Gemini conversational analysis.
  * Only identifies REASSIGN corrections (entire segment to different speaker).
  * Split corrections are disabled as they caused timestamp issues.
@@ -2187,6 +2374,8 @@ function mergeWhisperXAndGeminiData(
 
   // Map speakers (use Gemini's inferred names/roles if available)
   const speakers: Record<string, Speaker> = {};
+  let speakerIdentificationSource = 'default';  // Track which source we used
+
   whisperxData.speakers.forEach((s, idx) => {
     let displayName = s.name;  // Default: "Speaker 1", "Speaker 2", etc.
 
@@ -2194,6 +2383,7 @@ function mergeWhisperXAndGeminiData(
     if (analysis.speakerNotes) {
       const speakerNote = analysis.speakerNotes.find(n => n.speakerId === s.id);
       if (speakerNote) {
+        speakerIdentificationSource = 'content-analysis';  // Using post-WhisperX analysis
         if (speakerNote.inferredName) {
           const inferredLower = speakerNote.inferredName.toLowerCase().trim();
 
@@ -2230,9 +2420,9 @@ function mergeWhisperXAndGeminiData(
     };
   });
 
-  // Log speaker identification results
+  // Log speaker identification results with source
   const speakerSummary = Object.values(speakers).map(s => s.displayName).join(', ');
-  console.debug(`[Merge] Speaker identification: ${speakerSummary}`);
+  console.log(`[Merge] Speaker identification (source: ${speakerIdentificationSource}): ${speakerSummary}`);
 
   // Map segments (already have correct timestamps from WhisperX)
   const segments: Segment[] = whisperxData.segments.map((seg, idx) => ({
