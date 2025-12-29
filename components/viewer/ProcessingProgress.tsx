@@ -1,11 +1,70 @@
 import React from 'react';
-import { ProcessingProgress as ProcessingProgressType, ProcessingStep } from '../../types';
+import { ProcessingProgress as ProcessingProgressType, ProcessingStep, StepMeta } from '../../types';
 import { Loader2, Upload, Mic, Brain, Activity, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
 import { cn } from '../../utils';
 
 interface ProcessingProgressProps {
   progress?: ProcessingProgressType;
   compact?: boolean; // For use in list view vs. full view
+}
+
+// Category-based styling for dynamic progress display (StepMeta-driven)
+const CATEGORY_STYLES: Record<StepMeta['category'], {
+  textClass: string;
+  bgClass: string;
+  progressClass: string;
+}> = {
+  pending: {
+    textClass: 'text-slate-600',
+    bgClass: 'bg-slate-100',
+    progressClass: 'bg-slate-500'
+  },
+  active: {
+    textClass: 'text-blue-600',
+    bgClass: 'bg-blue-100',
+    progressClass: 'bg-blue-500'
+  },
+  success: {
+    textClass: 'text-emerald-600',
+    bgClass: 'bg-emerald-100',
+    progressClass: 'bg-emerald-500'
+  },
+  error: {
+    textClass: 'text-red-600',
+    bgClass: 'bg-red-100',
+    progressClass: 'bg-red-500'
+  }
+};
+
+// Category-based icons for dynamic progress display
+const CATEGORY_ICONS: Record<StepMeta['category'], typeof Loader2> = {
+  pending: Loader2,
+  active: Activity,
+  success: CheckCircle2,
+  error: AlertCircle
+};
+
+/**
+ * Infer category from step for backward compatibility with legacy data
+ * (when stepMeta is not present)
+ */
+function inferCategory(step: ProcessingStep): StepMeta['category'] {
+  switch (step) {
+    case ProcessingStep.PENDING:
+      return 'pending';
+    case ProcessingStep.UPLOADING:
+    case ProcessingStep.TRANSCRIBING:
+    case ProcessingStep.ANALYZING:
+    case ProcessingStep.ALIGNING:
+    case ProcessingStep.FINALIZING:
+      return 'active';
+    case ProcessingStep.COMPLETE:
+      return 'success';
+    case ProcessingStep.FAILED:
+      return 'error';
+    default:
+      return 'pending';
+  }
 }
 
 /**
@@ -35,9 +94,10 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
     );
   }
 
-  const { currentStep, percentComplete, errorMessage } = progress;
+  const { currentStep, percentComplete, errorMessage, stepMeta } = progress;
 
-  // Step configuration with icons, labels, and specific Tailwind classes
+  // Legacy step configuration for backward compatibility (when stepMeta not present)
+  // Preserves original per-step icons and multi-color styling
   const stepConfig: Record<ProcessingStep, {
     icon: typeof Loader2;
     label: string;
@@ -103,8 +163,31 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
     }
   };
 
-  const config = stepConfig[currentStep];
-  const Icon = config.icon;
+  // Dynamic display logic: use stepMeta if present, fallback to legacy stepConfig
+  const useDynamicDisplay = !!stepMeta;
+
+  let label: string;
+  let Icon: typeof Loader2;
+  let styles: { textClass: string; bgClass: string; progressClass: string };
+
+  if (useDynamicDisplay) {
+    // Dynamic mode: use stepMeta label and category-based styling
+    label = stepMeta.label;
+    const category = stepMeta.category;
+    Icon = CATEGORY_ICONS[category];
+    styles = CATEGORY_STYLES[category];
+  } else {
+    // Legacy mode: use hardcoded stepConfig for exact backward compatibility
+    const config = stepConfig[currentStep];
+    label = config.label;
+    Icon = config.icon;
+    styles = {
+      textClass: config.textClass,
+      bgClass: config.bgClass,
+      progressClass: config.progressClass
+    };
+  }
+
   const isProcessing = ![ProcessingStep.COMPLETE, ProcessingStep.FAILED].includes(currentStep);
 
   if (compact) {
@@ -115,14 +198,14 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
           <Icon
             size={14}
             className={cn(
-              config.textClass,
+              styles.textClass,
               isProcessing && 'animate-spin'
             )}
           />
           <span className="text-xs font-medium text-slate-700">
-            {config.label}
+            {label}
           </span>
-          <span className={cn("text-xs", config.textClass)}>
+          <span className={cn("text-xs", styles.textClass)}>
             {percentComplete}%
           </span>
         </div>
@@ -131,7 +214,7 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
           <div
             className={cn(
               "h-full rounded-full transition-all duration-500",
-              config.progressClass
+              styles.progressClass
             )}
             style={{ width: `${percentComplete}%` }}
           />
@@ -152,24 +235,24 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
         <div className="flex items-center gap-3">
           <div className={cn(
             "w-10 h-10 rounded-lg flex items-center justify-center",
-            config.bgClass
+            styles.bgClass
           )}>
             <Icon
               size={20}
               className={cn(
-                config.textClass,
+                styles.textClass,
                 isProcessing && 'animate-spin'
               )}
             />
           </div>
           <div>
-            <h4 className="text-sm font-medium text-slate-900">{config.label}</h4>
+            <h4 className="text-sm font-medium text-slate-900">{label}</h4>
             <p className="text-xs text-slate-500">Processing your audio</p>
           </div>
         </div>
         <div className={cn(
           "text-2xl font-bold",
-          config.textClass
+          styles.textClass
         )}>
           {percentComplete}%
         </div>
@@ -180,7 +263,7 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
         <div
           className={cn(
             "h-full rounded-full transition-all duration-500",
-            config.progressClass
+            styles.progressClass
           )}
           style={{ width: `${percentComplete}%` }}
         />

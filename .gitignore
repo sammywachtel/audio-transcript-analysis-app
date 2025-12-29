@@ -48,3 +48,5 @@ htmlcov/
 .mypy_cache/
 __pycache__
 /.agent_process/
+/.claude/
+CLAUDE.md
