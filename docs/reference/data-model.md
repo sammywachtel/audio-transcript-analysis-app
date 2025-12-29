@@ -411,6 +411,86 @@ interface PersonOccurrence {
 }
 ```
 
+### ProcessingStep
+
+Enum representing granular processing stages:
+
+```typescript
+enum ProcessingStep {
+  PENDING = 'pending',         // Waiting to start
+  UPLOADING = 'uploading',     // Audio uploading to Storage
+  TRANSCRIBING = 'transcribing', // WhisperX transcription
+  ANALYZING = 'analyzing',     // Gemini analysis (terms, topics, people)
+  ALIGNING = 'aligning',       // WhisperX timestamp alignment
+  FINALIZING = 'finalizing',   // Writing results to Firestore
+  COMPLETE = 'complete',       // Processing finished successfully
+  FAILED = 'failed'            // Processing failed with error
+}
+```
+
+### StepMeta
+
+Metadata for enhanced UI display of processing steps:
+
+```typescript
+interface StepMeta {
+  label: string;              // Human-readable step name (e.g., "Transcribing Audio")
+  description?: string;       // Optional detailed description of current activity
+  category: 'pending' | 'active' | 'success' | 'error';  // Visual state category
+}
+```
+
+**Category Values:**
+- `'pending'` - Step not yet started (gray/muted styling)
+- `'active'` - Step currently in progress (blue/animated styling)
+- `'success'` - Step completed successfully (green/check styling)
+- `'error'` - Step failed with error (red/warning styling)
+
+### ProcessingProgress
+
+Real-time processing status for user feedback:
+
+```typescript
+interface ProcessingProgress {
+  currentStep: ProcessingStep;       // Current processing stage
+  percentComplete: number;           // 0-100 progress percentage
+  stepStartedAt?: string;            // ISO timestamp when current step began
+  estimatedRemainingMs?: number;     // Estimated time to completion
+  errorMessage?: string;             // Error details if failed
+  stepMeta?: StepMeta;               // Optional metadata for enhanced UI feedback
+}
+```
+
+**Backward Compatibility Note:** The `stepMeta` field is optional to maintain compatibility with existing conversations created before this feature was added. Legacy data will have `stepMeta: undefined`, and UI components should gracefully handle this case by falling back to default display behavior based on `currentStep`.
+
+**Example JSON:**
+```json
+{
+  "currentStep": "analyzing",
+  "percentComplete": 65,
+  "stepStartedAt": "2025-01-15T14:30:00.000Z",
+  "estimatedRemainingMs": 45000,
+  "stepMeta": {
+    "label": "Analyzing Content",
+    "description": "Extracting topics, terms, and identifying speakers...",
+    "category": "active"
+  }
+}
+```
+
+### ProcessingTimeline
+
+Timeline tracking for performance analysis and debugging:
+
+```typescript
+interface ProcessingTimeline {
+  stepName: ProcessingStep;   // Which step this entry represents
+  startedAt: string;          // ISO timestamp when step started
+  completedAt?: string;       // ISO timestamp when step completed (absent if in-progress)
+  durationMs?: number;        // Duration in milliseconds (computed when completedAt is set)
+}
+```
+
 ## Firebase Storage Structure
 
 ```

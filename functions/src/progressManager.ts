@@ -5,8 +5,10 @@ import { db } from './index';
 export enum ProcessingStep {
   PENDING = 'pending',
   UPLOADING = 'uploading',
+  PRE_ANALYZING = 'pre_analyzing',
   TRANSCRIBING = 'transcribing',
   ANALYZING = 'analyzing',
+  REASSIGNING = 'reassigning',
   ALIGNING = 'aligning',
   FINALIZING = 'finalizing',
   COMPLETE = 'complete',
@@ -17,8 +19,10 @@ export enum ProcessingStep {
 const STEP_PERCENTAGES: Record<ProcessingStep, number> = {
   [ProcessingStep.PENDING]: 0,
   [ProcessingStep.UPLOADING]: 15,
+  [ProcessingStep.PRE_ANALYZING]: 25,
   [ProcessingStep.TRANSCRIBING]: 40,
   [ProcessingStep.ANALYZING]: 60,
+  [ProcessingStep.REASSIGNING]: 75,
   [ProcessingStep.ALIGNING]: 85,
   [ProcessingStep.FINALIZING]: 95,
   [ProcessingStep.COMPLETE]: 100,
@@ -44,6 +48,11 @@ const STEP_META: Record<ProcessingStep, StepMeta> = {
     description: 'Uploading audio file to storage',
     category: 'active'
   },
+  [ProcessingStep.PRE_ANALYZING]: {
+    label: 'Pre-analyzing',
+    description: 'Identifying speakers and analyzing audio structure',
+    category: 'active'
+  },
   [ProcessingStep.TRANSCRIBING]: {
     label: 'Transcribing',
     description: 'Converting speech to text with speaker diarization',
@@ -52,6 +61,11 @@ const STEP_META: Record<ProcessingStep, StepMeta> = {
   [ProcessingStep.ANALYZING]: {
     label: 'Analyzing',
     description: 'Extracting topics, terms, and detecting people mentioned',
+    category: 'active'
+  },
+  [ProcessingStep.REASSIGNING]: {
+    label: 'Reassigning Speakers',
+    description: 'Correcting speaker identification based on content analysis',
     category: 'active'
   },
   [ProcessingStep.ALIGNING]: {

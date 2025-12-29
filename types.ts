@@ -99,8 +99,10 @@ export interface UserProfile {
 export enum ProcessingStep {
   PENDING = 'pending',
   UPLOADING = 'uploading',
+  PRE_ANALYZING = 'pre_analyzing',
   TRANSCRIBING = 'transcribing',
   ANALYZING = 'analyzing',
+  REASSIGNING = 'reassigning',
   ALIGNING = 'aligning',
   FINALIZING = 'finalizing',
   COMPLETE = 'complete',

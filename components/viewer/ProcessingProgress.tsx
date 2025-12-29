@@ -1,6 +1,6 @@
 import React from 'react';
 import { ProcessingProgress as ProcessingProgressType, ProcessingStep, StepMeta } from '../../types';
-import { Loader2, Upload, Mic, Brain, Activity, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
+import { Loader2, Upload, Mic, Brain, Activity, CheckCircle2, AlertCircle, Sparkles, Users, Search } from 'lucide-react';
 import { cn } from '../../utils';
 
 interface ProcessingProgressProps {
@@ -119,6 +119,13 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
       bgClass: 'bg-blue-100',
       progressClass: 'bg-blue-500'
     },
+    [ProcessingStep.PRE_ANALYZING]: {
+      icon: Search,
+      label: 'Pre-analyzing',
+      textClass: 'text-cyan-600',
+      bgClass: 'bg-cyan-100',
+      progressClass: 'bg-cyan-500'
+    },
     [ProcessingStep.TRANSCRIBING]: {
       icon: Mic,
       label: 'Transcribing',
@@ -132,6 +139,13 @@ export const ProcessingProgress: React.FC<ProcessingProgressProps> = ({ progress
       textClass: 'text-indigo-600',
       bgClass: 'bg-indigo-100',
       progressClass: 'bg-indigo-500'
+    },
+    [ProcessingStep.REASSIGNING]: {
+      icon: Users,
+      label: 'Reassigning Speakers',
+      textClass: 'text-amber-600',
+      bgClass: 'bg-amber-100',
+      progressClass: 'bg-amber-500'
     },
     [ProcessingStep.ALIGNING]: {
       icon: Activity,

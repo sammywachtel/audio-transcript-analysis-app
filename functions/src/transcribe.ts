@@ -627,8 +627,8 @@ export const transcribeAudio = onObjectFinalized(
         updatedAt: FieldValue.serverTimestamp()
       });
 
-      // Start transcription step
-      await progressManager.setStep(ProcessingStep.TRANSCRIBING);
+      // Start pre-analysis step (Gemini analyzes audio structure before WhisperX)
+      await progressManager.setStep(ProcessingStep.PRE_ANALYZING);
 
       // Download audio file to memory
       console.debug('[Transcribe] Starting audio download from Storage...');
@@ -654,6 +654,7 @@ export const transcribeAudio = onObjectFinalized(
       // === GEMINI-FIRST ARCHITECTURE ===
       // Step 1: Pre-analyze with Gemini to get speaker hints + full content analysis
       // This runs BEFORE WhisperX to provide hints that improve diarization accuracy
+      // (PRE_ANALYZING step already set at function start - includes download time)
       console.log('[Transcribe] Step 1: Pre-analyzing audio with Gemini...');
       const preAnalysisStartTime = Date.now();
 
@@ -688,6 +689,7 @@ export const transcribeAudio = onObjectFinalized(
       await checkAbort(conversationId);
 
       // Step 2: Get transcript + timestamps from WhisperX (with hints from Gemini)
+      await progressManager.setStep(ProcessingStep.TRANSCRIBING);
       console.log('[Transcribe] Step 2: Calling WhisperX for transcription with hints...');
       const whisperxStartTime = Date.now();
 
@@ -856,6 +858,7 @@ export const transcribeAudio = onObjectFinalized(
       await checkAbort(conversationId);
 
       // Step 3.5: Speaker reassignment pass (reassign only, no splits/timestamp changes)
+      await progressManager.setStep(ProcessingStep.REASSIGNING);
       console.log('[Transcribe] Step 3.5: Identifying speaker reassignments...');
       const speakerCorrectionStartTime = Date.now();
 
