@@ -107,6 +107,13 @@ export enum ProcessingStep {
   FAILED = 'failed'
 }
 
+// Metadata for each processing step (UI display info)
+export interface StepMeta {
+  label: string;
+  description?: string;
+  category: 'pending' | 'active' | 'success' | 'error';
+}
+
 // Real-time processing progress for user feedback
 export interface ProcessingProgress {
   currentStep: ProcessingStep;
@@ -114,6 +121,7 @@ export interface ProcessingProgress {
   stepStartedAt?: string; // ISO timestamp
   estimatedRemainingMs?: number;
   errorMessage?: string;
+  stepMeta?: StepMeta; // Optional metadata for enhanced UI feedback
 }
 
 // Timeline tracking for performance analysis
