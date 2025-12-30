@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { SegmentMatch } from '../../services/searchService';
 import { highlightMatches } from '../../utils/textHighlight';
 import { formatTime } from '../../utils';
@@ -8,6 +8,7 @@ interface SegmentResultProps {
   match: SegmentMatch;
   searchQuery: string;
   onOpenInViewer: (conversationId: string, segmentId: string) => void;
+  onPreview?: (match: SegmentMatch, buttonRef: React.RefObject<HTMLButtonElement>) => void;
 }
 
 /**
@@ -21,9 +22,11 @@ interface SegmentResultProps {
 export const SegmentResult: React.FC<SegmentResultProps> = ({
   match,
   searchQuery,
-  onOpenInViewer
+  onOpenInViewer,
+  onPreview
 }) => {
   const highlightedSegments = highlightMatches(match.snippet, searchQuery);
+  const previewButtonRef = useRef<HTMLButtonElement>(null);
 
   return (
     <div className="border-l-2 border-slate-200 pl-3 py-2 hover:border-blue-400 transition-colors group">
@@ -52,13 +55,27 @@ export const SegmentResult: React.FC<SegmentResultProps> = ({
           </p>
         </div>
 
-        {/* Open in Viewer button */}
-        <button
-          onClick={() => onOpenInViewer(match.conversationId, match.segmentId)}
-          className="shrink-0 px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition-colors opacity-0 group-hover:opacity-100"
-        >
-          Open
-        </button>
+        {/* Action buttons */}
+        <div className="shrink-0 flex items-center gap-2 opacity-0 group-hover:opacity-100">
+          {/* Preview button */}
+          {onPreview && (
+            <button
+              ref={previewButtonRef}
+              onClick={() => onPreview(match, previewButtonRef)}
+              className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition-colors"
+            >
+              Preview
+            </button>
+          )}
+
+          {/* Open in Viewer button */}
+          <button
+            onClick={() => onOpenInViewer(match.conversationId, match.segmentId)}
+            className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition-colors"
+          >
+            Open
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -67,12 +67,14 @@ interface UserDoc {
 
 ### _metrics
 
-Processing metrics for observability (admin read-only). Tracks detailed processing statistics, LLM usage, and estimated costs.
+Processing metrics for observability (admin read-only). Tracks detailed processing statistics, LLM usage, and estimated costs. Supports both transcription jobs and chat queries (discriminated by `type` field).
 
 **Path**: `_metrics/{docId}`
 
+**Transcription Metrics**:
 ```typescript
-interface MetricsDoc {
+interface TranscriptionMetricsDoc {
+  type?: 'transcription';  // Optional for backward compatibility (absence implies transcription)
   conversationId: string;
   userId: string;
   status: 'success' | 'failed';
@@ -134,6 +136,34 @@ interface MetricsDoc {
     diarizationUsd: number;
     totalUsd: number;
   };
+
+  // Timestamp
+  timestamp: Timestamp;
+}
+```
+
+**Chat Metrics**:
+```typescript
+interface ChatMetricsDoc {
+  type: 'chat';  // Required discriminator
+  conversationId: string;
+  userId: string;
+  queryType: 'question' | 'follow_up';  // Heuristic-based classification
+
+  // Token usage
+  tokenUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    model: string;  // e.g., 'gemini-2.5-flash'
+  };
+
+  // Cost and performance
+  costUsd: number;              // Estimated cost for this query
+  responseTimeMs: number;       // Total request processing time
+
+  // Response quality
+  sourcesCount: number;         // Number of validated timestamp sources
+  isUnanswerable: boolean;      // Whether LLM indicated question was unanswerable
 
   // Timestamp
   timestamp: Timestamp;
@@ -304,6 +334,29 @@ interface PricingDoc {
 ```
 
 **Security**: All authenticated users can read (for cost display). Only admin users can write.
+
+### _chat_rate_limits
+
+Rate limiting storage for chat queries to prevent abuse.
+
+**Path**: `_chat_rate_limits/{conversationId}_{userId}_{YYYY-MM-DD}`
+
+```typescript
+interface ChatRateLimitDoc {
+  conversationId: string;
+  userId: string;
+  dateBucket: string;              // YYYY-MM-DD in UTC
+  queryCount: number;              // Number of queries made today
+  firstQueryAt: Timestamp;         // First query of the day
+  lastQueryAt: Timestamp;          // Most recent query
+}
+```
+
+**Design**: Uses composite document ID to avoid Firestore hot spots. Each user/conversation/day combination gets its own document, allowing distributed writes. Rate limit resets daily at midnight UTC.
+
+**Limit**: 20 queries per conversation per day per user.
+
+**Security**: Only Cloud Functions can read/write (implicit - no client access needed).
 
 ## TypeScript Types
 
@@ -718,6 +771,49 @@ interface GeminiResponse {
 ```typescript
 { url: string }  // Signed URL valid for 1 hour
 ```
+
+### chatWithConversation (HTTPS Callable)
+
+**Request**:
+```typescript
+{
+  conversationId: string;
+  message: string;  // Max 1000 characters
+}
+```
+
+**Response**:
+```typescript
+{
+  answer: string;                    // LLM-generated answer
+  sources: Array<{                   // Validated timestamp sources
+    segmentId: string;
+    startMs: number;
+    endMs: number;
+    text: string;
+    confidence: 'high' | 'medium' | 'low';
+  }>;
+  isUnanswerable: boolean;           // True if question not answerable from transcript
+  tokenUsage: {                      // LLM usage for this query
+    inputTokens: number;
+    outputTokens: number;
+    model: string;
+  };
+  costUsd: number;                   // Estimated cost for this query
+  responseTimeMs: number;            // Processing time
+  rateLimitRemaining: number;        // Queries remaining today
+}
+```
+
+**Rate Limiting**: 20 queries per conversation per day per user. Resets at midnight UTC.
+
+**Errors**:
+- `unauthenticated`: User not signed in
+- `invalid-argument`: Missing/invalid conversationId or message
+- `not-found`: Conversation doesn't exist
+- `permission-denied`: User doesn't own the conversation
+- `failed-precondition`: Conversation not ready (status != 'complete')
+- `resource-exhausted`: Rate limit exceeded
 
 ## Related Documentation
 

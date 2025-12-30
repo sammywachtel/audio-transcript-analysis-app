@@ -5,9 +5,12 @@ import { useSearchFilters } from '../hooks/useSearchFilters';
 import { SearchResults } from '../components/search/SearchResults';
 import { FilterSidebar } from '../components/search/FilterSidebar';
 import { FilterBottomSheet } from '../components/search/FilterBottomSheet';
+import { AudioPreviewModal } from '../components/search/AudioPreviewModal';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ArrowLeft, Search as SearchIcon, Filter } from 'lucide-react';
 import { Button } from '../components/Button';
+import { SegmentMatch } from '../services/searchService';
+import { Conversation } from '../types';
 
 interface SearchProps {
   onBack: () => void;
@@ -26,14 +29,24 @@ interface SearchProps {
  * - Pagination (20 results initially, "Load more" for additional)
  * - URL synchronization (managed by App component)
  */
+interface PreviewState {
+  match: SegmentMatch;
+  audioUrl: string;
+  conversation: Conversation;
+  triggerRef: React.RefObject<HTMLButtonElement>;
+  clipStartMs: number;
+  clipEndMs: number;
+}
+
 export const Search: React.FC<SearchProps> = ({
   onBack,
   onOpenConversation,
   initialQuery = '',
   onQueryChange
 }) => {
-  const { conversations, isLoaded } = useConversations();
+  const { conversations, isLoaded, getAudioUrl } = useConversations();
   const [isFilterSheetOpen, setIsFilterSheetOpen] = useState(false);
+  const [previewState, setPreviewState] = useState<PreviewState | null>(null);
 
   // Filter state
   const {
@@ -73,6 +86,39 @@ export const Search: React.FC<SearchProps> = ({
   const handleOpenInViewer = useCallback((conversationId: string, segmentId: string) => {
     onOpenConversation(conversationId, segmentId);
   }, [onOpenConversation]);
+
+  // Handle audio preview
+  const handlePreview = useCallback(async (
+    match: SegmentMatch,
+    buttonRef: React.RefObject<HTMLButtonElement>,
+    conversation: Conversation
+  ) => {
+    // Fetch audio URL
+    const audioUrl = await getAudioUrl(conversation.conversationId);
+    if (!audioUrl) {
+      console.error('[Search] No audio URL available for conversation:', conversation.conversationId);
+      return;
+    }
+
+    // Compute 15-second clip window around segment midpoint
+    const segmentMidpointMs = (match.segment.startMs + match.segment.endMs) / 2;
+    const clipStartMs = Math.max(0, segmentMidpointMs - 7500); // 7.5 seconds before
+    const clipEndMs = Math.min(conversation.durationMs, clipStartMs + 15000); // 15 seconds total
+
+    setPreviewState({
+      match,
+      audioUrl,
+      conversation,
+      triggerRef: buttonRef,
+      clipStartMs,
+      clipEndMs
+    });
+  }, [getAudioUrl]);
+
+  // Close preview modal
+  const handleClosePreview = useCallback(() => {
+    setPreviewState(null);
+  }, []);
 
   // Loading state for conversation data
   if (!isLoaded) {
@@ -173,10 +219,22 @@ export const Search: React.FC<SearchProps> = ({
               hasMore={hasMore}
               onLoadMore={loadMore}
               onOpenInViewer={handleOpenInViewer}
+              onPreview={handlePreview}
             />
           </div>
         </div>
       </div>
+
+      {/* Audio Preview Modal */}
+      {previewState && (
+        <AudioPreviewModal
+          audioUrl={previewState.audioUrl}
+          clipStartMs={previewState.clipStartMs}
+          clipEndMs={previewState.clipEndMs}
+          onClose={handleClosePreview}
+          triggerRef={previewState.triggerRef}
+        />
+      )}
     </div>
   );
 };

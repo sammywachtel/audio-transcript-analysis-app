@@ -1,13 +1,15 @@
 import React from 'react';
-import { ConversationSearchResult } from '../../services/searchService';
+import { ConversationSearchResult, SegmentMatch } from '../../services/searchService';
 import { SegmentResult } from './SegmentResult';
 import { FileAudio, ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '../../utils';
+import { Conversation } from '../../types';
 
 interface ConversationResultCardProps {
   result: ConversationSearchResult;
   searchQuery: string;
   onOpenInViewer: (conversationId: string, segmentId: string) => void;
+  onPreview?: (match: SegmentMatch, buttonRef: React.RefObject<HTMLButtonElement>, conversation: Conversation) => void;
   defaultExpanded?: boolean;
 }
 
@@ -23,9 +25,17 @@ export const ConversationResultCard: React.FC<ConversationResultCardProps> = ({
   result,
   searchQuery,
   onOpenInViewer,
+  onPreview,
   defaultExpanded = true
 }) => {
   const [isExpanded, setIsExpanded] = React.useState(defaultExpanded);
+
+  // Enrich onPreview callback with conversation data
+  const handlePreview = onPreview
+    ? (match: SegmentMatch, buttonRef: React.RefObject<HTMLButtonElement>) => {
+        onPreview(match, buttonRef, result.conversation);
+      }
+    : undefined;
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
@@ -70,6 +80,7 @@ export const ConversationResultCard: React.FC<ConversationResultCardProps> = ({
                 match={match}
                 searchQuery={searchQuery}
                 onOpenInViewer={onOpenInViewer}
+                onPreview={handlePreview}
               />
             ))}
           </div>
