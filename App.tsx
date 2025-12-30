@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Library } from './pages/Library';
 import { Viewer } from './pages/Viewer';
+import { Search } from './pages/Search';
 import { AdminDashboard } from './pages/AdminDashboard';
 import { UserStats } from './pages/UserStats';
 import { AuthProvider } from './contexts/AuthContext';
@@ -11,21 +12,65 @@ import { AdminRoute } from './components/auth/AdminRoute';
 /**
  * AppContent - Main app routing logic
  *
- * Handles view switching between Library, Viewer, Admin Dashboard, and User Stats.
+ * Handles view switching between Library, Viewer, Search, Admin Dashboard, and User Stats.
+ * Uses window.location for routing without a router library.
  * Admin dashboard is gated by AdminRoute component.
  */
 function AppContent() {
-  const [currentView, setCurrentView] = useState<'library' | 'viewer' | 'admin' | 'stats'>('library');
+  const [currentView, setCurrentView] = useState<'library' | 'viewer' | 'search' | 'admin' | 'stats'>('library');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [targetSegmentId, setTargetSegmentId] = useState<string | undefined>(undefined);
   const { isLoaded, activeConversation, setActiveConversationId } = useConversations();
 
-  const handleOpen = (id: string) => {
+  // Initialize view from URL on mount and handle browser back/forward
+  useEffect(() => {
+    const syncFromUrl = () => {
+      const path = window.location.pathname;
+      const params = new URLSearchParams(window.location.search);
+
+      if (path === '/search') {
+        setCurrentView('search');
+        setSearchQuery(params.get('q') || '');
+      } else {
+        // Default to library for root or unknown paths
+        setCurrentView('library');
+      }
+    };
+
+    // Sync on mount
+    syncFromUrl();
+
+    // Handle browser back/forward
+    window.addEventListener('popstate', syncFromUrl);
+    return () => window.removeEventListener('popstate', syncFromUrl);
+  }, []);
+
+  const handleOpen = (id: string, targetSegment?: string) => {
     setActiveConversationId(id);
+    setTargetSegmentId(targetSegment);
     setCurrentView('viewer');
+    // Clear URL params when opening viewer (viewer doesn't use URL state)
+    window.history.pushState({}, '', '/');
   };
 
   const handleBack = () => {
     setCurrentView('library');
     setActiveConversationId(null);
+    setTargetSegmentId(undefined);
+    window.history.pushState({}, '', '/');
+  };
+
+  const handleSearchClick = () => {
+    setCurrentView('search');
+    const url = searchQuery ? `/search?q=${encodeURIComponent(searchQuery)}` : '/search';
+    window.history.pushState({}, '', url);
+  };
+
+  const handleSearchQueryChange = (query: string) => {
+    setSearchQuery(query);
+    // Update URL with new query
+    const url = query ? `/search?q=${encodeURIComponent(query)}` : '/search';
+    window.history.replaceState({}, '', url);
   };
 
   const handleAdminClick = () => {
@@ -34,6 +79,7 @@ function AppContent() {
 
   const handleAdminBack = () => {
     setCurrentView('library');
+    window.history.pushState({}, '', '/');
   };
 
   const handleStatsClick = () => {
@@ -42,6 +88,7 @@ function AppContent() {
 
   const handleStatsBack = () => {
     setCurrentView('library');
+    window.history.pushState({}, '', '/');
   };
 
   if (!isLoaded) {
@@ -54,7 +101,7 @@ function AppContent() {
 
   if (currentView === 'admin') {
     return (
-      <AdminRoute fallback={<Library onOpen={handleOpen} onAdminClick={handleAdminClick} onStatsClick={handleStatsClick} />}>
+      <AdminRoute fallback={<Library onOpen={handleOpen} onAdminClick={handleAdminClick} onStatsClick={handleStatsClick} onSearchClick={handleSearchClick} />}>
         <AdminDashboard onBack={handleAdminBack} />
       </AdminRoute>
     );
@@ -64,11 +111,28 @@ function AppContent() {
     return <UserStats onBack={handleStatsBack} />;
   }
 
-  if (currentView === 'viewer' && activeConversation) {
-    return <Viewer onBack={handleBack} onStatsClick={handleStatsClick} />;
+  if (currentView === 'search') {
+    return (
+      <Search
+        onBack={handleBack}
+        onOpenConversation={handleOpen}
+        initialQuery={searchQuery}
+        onQueryChange={handleSearchQueryChange}
+      />
+    );
   }
 
-  return <Library onOpen={handleOpen} onAdminClick={handleAdminClick} onStatsClick={handleStatsClick} />;
+  if (currentView === 'viewer' && activeConversation) {
+    return (
+      <Viewer
+        onBack={handleBack}
+        onStatsClick={handleStatsClick}
+        targetSegmentId={targetSegmentId}
+      />
+    );
+  }
+
+  return <Library onOpen={handleOpen} onAdminClick={handleAdminClick} onStatsClick={handleStatsClick} onSearchClick={handleSearchClick} />;
 }
 
 /**

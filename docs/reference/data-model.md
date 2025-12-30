@@ -615,6 +615,8 @@ service cloud.firestore {
 }
 ```
 
+**Search Functionality Note**: The full-text search feature (added in search_discovery_scope_02) runs entirely client-side and does **not** require additional Firestore indexes. Search operates on conversations already loaded into the client from the existing `userId` + `createdAt` index. All matching, ranking, and snippet extraction happens in the browser using `services/searchService.ts`.
+
 ## Service API
 
 ### FirestoreService

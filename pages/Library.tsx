@@ -3,7 +3,7 @@ import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3 } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3, Search } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgressRow } from '../components/library/ProcessingProgressRow';
@@ -15,9 +15,10 @@ interface LibraryProps {
   onOpen: (id: string) => void;
   onAdminClick: () => void;
   onStatsClick: () => void;
+  onSearchClick: () => void;
 }
 
-export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsClick }) => {
+export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsClick, onSearchClick }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [deleteConfirmConv, setDeleteConfirmConv] = useState<Conversation | null>(null);
   const [abortConfirmConv, setAbortConfirmConv] = useState<Conversation | null>(null);
@@ -107,6 +108,14 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={onSearchClick}
+              className="gap-2"
+            >
+              <Search size={18} />
+              Search
+            </Button>
             <Button
               variant="ghost"
               onClick={onStatsClick}
