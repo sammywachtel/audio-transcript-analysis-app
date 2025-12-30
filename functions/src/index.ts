@@ -25,6 +25,7 @@ export const bucket = getStorage().bucket();
 // Export cloud functions
 export { transcribeAudio } from './transcribe';
 export { getSignedAudioUrl } from './getAudioUrl';
+export { chatWithConversation } from './chat';
 
 // Export stats tracking triggers
 export { onConversationCreated, onConversationDeleted } from './statsTriggers';

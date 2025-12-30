@@ -1,9 +1,10 @@
 import React from 'react';
-import { SearchResults as SearchResultsType } from '../../services/searchService';
+import { SearchResults as SearchResultsType, SegmentMatch } from '../../services/searchService';
 import { ConversationResultCard } from './ConversationResultCard';
 import { ZeroResultsState } from './ZeroResultsState';
 import { Button } from '../Button';
 import { Loader2 } from 'lucide-react';
+import { Conversation } from '../../types';
 
 interface SearchResultsProps {
   results: SearchResultsType;
@@ -12,6 +13,7 @@ interface SearchResultsProps {
   hasMore: boolean;
   onLoadMore: () => void;
   onOpenInViewer: (conversationId: string, segmentId: string) => void;
+  onPreview?: (match: SegmentMatch, buttonRef: React.RefObject<HTMLButtonElement>, conversation: Conversation) => void;
 }
 
 /**
@@ -29,7 +31,8 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
   isLoading,
   hasMore,
   onLoadMore,
-  onOpenInViewer
+  onOpenInViewer,
+  onPreview
 }) => {
   // Loading state
   if (isLoading) {
@@ -72,6 +75,7 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
             result={result}
             searchQuery={searchQuery}
             onOpenInViewer={onOpenInViewer}
+            onPreview={onPreview}
           />
         ))}
       </div>

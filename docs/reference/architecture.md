@@ -38,17 +38,17 @@ Technical architecture of the Audio Transcript Analysis App.
 │  ┌───────────────────────────────────────────────────────────┐   │
 │  │                   Cloud Functions                         │   │
 │  │                                                           │   │
-│  │  ┌────────────────────┐    ┌────────────────────────┐     │   │
-│  │  │  transcribeAudio   │    │    getAudioUrl         │     │   │
-│  │  │  (Storage trigger) │    │    (HTTPS callable)    │     │   │
-│  │  │                    │    └────────────────────────┘     │   │
-│  │  │  ┌──────────────┐  │                                   │   │
-│  │  │  │  alignment   │  │  ← HARDY algorithm (internal)     │   │
-│  │  │  │  module      │  │                                   │   │
-│  │  │  └──────────────┘  │                                   │   │
-│  │  └─────────┬──────────┘                                   │   │
-│  │            │                                              │   │
-│  └────────────┼──────────────────────────────────────────────┘   │
+│  │  ┌────────────────────┐  ┌────────────────────────┐       │   │
+│  │  │  transcribeAudio   │  │    getAudioUrl         │       │   │
+│  │  │  (Storage trigger) │  │  (HTTPS callable)      │       │   │
+│  │  │                    │  └────────────────────────┘       │   │
+│  │  │  ┌──────────────┐  │  ┌────────────────────────┐       │   │
+│  │  │  │  alignment   │  │  │ chatWithConversation  │       │   │
+│  │  │  │  module      │  │  │  (HTTPS callable)      │       │   │
+│  │  │  └──────────────┘  │  └────────────────────────┘       │   │
+│  │  └─────────┬──────────┘            │                      │   │
+│  │            │                       │                      │   │
+│  └────────────┼───────────────────────┼──────────────────────┘   │
 │               │                                                  │
 └───────────────┼──────────────────────────────────────────────────┘
                 │
@@ -311,6 +311,59 @@ Cloud Function (transcribeAudio)
 - URL syncs with query AND filters for shareable search links
 - Browser back/forward restores full filter state
 - SessionStorage persists filters when navigating away and returning
+
+### Chat Flow
+
+```
+1. User asks question about transcript
+        ↓
+2. chatWithConversation Cloud Function invoked
+        ↓
+3. Rate limit check (20 queries/day per conversation)
+        ↓
+4. Fetch conversation from Firestore + verify ownership
+        ↓
+5. buildChatPrompt constructs context:
+   ├── Full transcript with speaker attribution
+   ├── Topics, terms, people metadata
+   └── System instructions requiring timestamp citations
+        ↓
+6. Call Gemini API (gemini-2.0-flash-exp)
+        ↓
+7. Extract segment indices from LLM response
+        ↓
+8. validateTimestampSources verifies citations:
+   ├── Match segment indices to actual segments
+   ├── Assign confidence levels (high/medium/low)
+   └── Filter out invalid sources
+        ↓
+9. Calculate cost and record metrics to _metrics collection
+        ↓
+10. Return structured response with:
+    ├── Answer text
+    ├── Validated timestamp sources
+    ├── Token usage and cost
+    ├── Rate limit remaining
+    └── isUnanswerable flag
+```
+
+**Key Components:**
+- `functions/src/chat.ts` - Main Cloud Function
+- `functions/src/utils/promptBuilder.ts` - Context-rich prompt construction
+- `functions/src/utils/timestampValidation.ts` - Source validation and confidence scoring
+- `functions/src/utils/rateLimit.ts` - Firestore-backed rate limiting
+- `functions/src/utils/chatMetrics.ts` - Chat-specific metrics recording
+
+**Rate Limiting:**
+- 20 queries per conversation per day per user
+- Stored in `_chat_rate_limits/{conversationId}_{userId}_{YYYY-MM-DD}`
+- Resets daily at midnight UTC
+- Uses Firestore transactions for atomic increment
+
+**Unanswerable Questions:**
+- LLM instructed to explicitly state when information not in transcript
+- `isUnanswerable` flag set based on response patterns
+- Empty or low-confidence sources returned for unanswerable questions
 
 ### Two-Way Selection Sync
 
