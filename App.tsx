@@ -65,7 +65,7 @@ function AppContent() {
   }
 
   if (currentView === 'viewer' && activeConversation) {
-    return <Viewer onBack={handleBack} />;
+    return <Viewer onBack={handleBack} onStatsClick={handleStatsClick} />;
   }
 
   return <Library onOpen={handleOpen} onAdminClick={handleAdminClick} onStatsClick={handleStatsClick} />;

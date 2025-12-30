@@ -21,6 +21,7 @@ import {
   MetricsTableSkeleton
 } from '../components/metrics';
 import { formatUsd } from '../services/metricsService';
+import { CostIndicator } from '../components/shared/CostIndicator';
 
 interface UserStatsProps {
   onBack: () => void;
@@ -99,12 +100,23 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
                       sublabel={`${stats.lifetime.totalAudioFiles} audio files`}
                       icon={<Clock size={20} className="text-purple-500" />}
                     />
-                    <StatCard
-                      label="Estimated Cost"
-                      value={formatUsd(stats.lifetime.estimatedCostUsd)}
-                      sublabel="LLM processing costs"
-                      icon={<DollarSign size={20} className="text-amber-500" />}
-                    />
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <DollarSign size={20} className="text-amber-500" />
+                        <div className="flex-1">
+                          <p className="text-xs text-slate-500 font-medium">Estimated Cost</p>
+                        </div>
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <CostIndicator
+                          cost={stats.lifetime.estimatedCostUsd}
+                          size="lg"
+                          showIcon={false}
+                          showBreakdown={false}
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500 mt-2">LLM processing costs</p>
+                    </div>
                   </>
                 ) : (
                   <div className="col-span-4 text-center text-slate-500 py-8 bg-white rounded-lg border border-slate-200">
@@ -142,9 +154,14 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
                         <p className="text-sm text-slate-500">Conversations created</p>
                       </div>
                       <div>
-                        <p className="text-2xl font-bold text-slate-900">
-                          {formatUsd(stats.last7Days.estimatedCostUsd)}
-                        </p>
+                        <div className="mb-1">
+                          <CostIndicator
+                            cost={stats.last7Days.estimatedCostUsd}
+                            size="md"
+                            showIcon={false}
+                            showBreakdown={false}
+                          />
+                        </div>
                         <p className="text-sm text-slate-500">Est. cost</p>
                       </div>
                     </div>
@@ -173,9 +190,14 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
                         <p className="text-sm text-slate-500">Conversations created</p>
                       </div>
                       <div>
-                        <p className="text-2xl font-bold text-slate-900">
-                          {formatUsd(stats.last30Days.estimatedCostUsd)}
-                        </p>
+                        <div className="mb-1">
+                          <CostIndicator
+                            cost={stats.last30Days.estimatedCostUsd}
+                            size="md"
+                            showIcon={false}
+                            showBreakdown={false}
+                          />
+                        </div>
                         <p className="text-sm text-slate-500">Est. cost</p>
                       </div>
                     </div>

@@ -3,10 +3,12 @@ import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3, StopCircle } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
-import { ProcessingProgress } from '../components/viewer/ProcessingProgress';
+import { ProcessingProgressRow } from '../components/library/ProcessingProgressRow';
+import { AbortConfirmModal } from '../components/library/AbortConfirmModal';
+import { DeleteConfirmModal } from '../components/shared/DeleteConfirmModal';
 import { firestoreService } from '../services/firestoreService';
 
 interface LibraryProps {
@@ -17,21 +19,32 @@ interface LibraryProps {
 
 export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsClick }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [deleteConfirmConv, setDeleteConfirmConv] = useState<Conversation | null>(null);
+  const [abortConfirmConv, setAbortConfirmConv] = useState<Conversation | null>(null);
   const { conversations, addConversation, deleteConversation, syncStatus } = useConversations();
   const { isAdmin } = useAuth();
 
-  const handleDelete = (e: React.MouseEvent, id: string) => {
+  const handleDelete = (e: React.MouseEvent, conv: Conversation) => {
     e.stopPropagation();
-    if (confirm('Are you sure you want to delete this conversation?')) {
-      deleteConversation(id);
+    setDeleteConfirmConv(conv);
+  };
+
+  const confirmDelete = async () => {
+    if (deleteConfirmConv) {
+      await deleteConversation(deleteConfirmConv.conversationId);
+      setDeleteConfirmConv(null);
     }
   };
 
-  const handleAbort = async (e: React.MouseEvent, id: string) => {
+  const handleAbort = async (e: React.MouseEvent, conv: Conversation) => {
     e.stopPropagation();
-    if (confirm('Are you sure you want to cancel this processing job? Partial costs may still be incurred.')) {
+    setAbortConfirmConv(conv);
+  };
+
+  const confirmAbort = async () => {
+    if (abortConfirmConv) {
       try {
-        const success = await firestoreService.abortProcessing(id);
+        const success = await firestoreService.abortProcessing(abortConfirmConv.conversationId);
         if (!success) {
           alert('Could not abort - conversation may no longer be processing.');
         }
@@ -39,6 +52,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
         console.error('Failed to abort processing:', error);
         alert('Failed to abort processing. Please try again.');
       }
+      setAbortConfirmConv(null);
     }
   };
 
@@ -118,7 +132,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
               <UploadCloud size={18} />
               Upload Audio
             </Button>
-            <UserMenu />
+            <UserMenu onStatsClick={onStatsClick} />
           </div>
         </div>
 
@@ -185,7 +199,10 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                                 </h3>
                                 {isProcessing ? (
                                   <div className="mt-1">
-                                    <ProcessingProgress progress={conv.processingProgress} compact />
+                                    <ProcessingProgressRow
+                                      progress={conv.processingProgress}
+                                      onAbort={() => setAbortConfirmConv(conv)}
+                                    />
                                   </div>
                                 ) : isAborted ? (
                                   <p className="text-xs text-red-600">
@@ -230,20 +247,10 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
                             </span>
                         </div>
                         <div className="hidden md:flex col-span-1 justify-end items-center gap-2">
-                             {/* Abort button for processing conversations */}
-                             {isProcessing && (
-                               <button
-                                  onClick={(e) => handleAbort(e, conv.conversationId)}
-                                  className="p-2 text-amber-500 hover:text-amber-700 hover:bg-amber-50 rounded transition-colors"
-                                  title="Cancel processing"
-                               >
-                                  <StopCircle size={16} />
-                               </button>
-                             )}
                              {/* Delete button for completed, failed, and aborted conversations */}
                              {(isComplete || isErrorState) && (
                                <button
-                                  onClick={(e) => handleDelete(e, conv.conversationId)}
+                                  onClick={(e) => handleDelete(e, conv)}
                                   className={cn(
                                     "p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors",
                                     isComplete ? "opacity-0 group-hover:opacity-100" : "opacity-100"
@@ -277,6 +284,26 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
         <UploadModal
           onClose={() => setIsModalOpen(false)}
           onUpload={handleUpload}
+        />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmConv && (
+        <DeleteConfirmModal
+          conversationTitle={deleteConfirmConv.title}
+          estimatedCost={deleteConfirmConv.processingProgress?.percentComplete === 100 ? 0.15 : undefined}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteConfirmConv(null)}
+        />
+      )}
+
+      {/* Abort Confirmation Modal */}
+      {abortConfirmConv && (
+        <AbortConfirmModal
+          conversationTitle={abortConfirmConv.title}
+          currentProgress={abortConfirmConv.processingProgress?.percentComplete}
+          onConfirm={confirmAbort}
+          onCancel={() => setAbortConfirmConv(null)}
         />
       )}
     </div>

@@ -5,14 +5,18 @@ import { useAudioPlayer } from '../hooks/useAudioPlayer';
 import { usePersonMentions } from '../hooks/usePersonMentions';
 import { useTranscriptSelection } from '../hooks/useTranscriptSelection';
 import { useAutoScroll } from '../hooks/useAutoScroll';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { ViewerHeader } from '../components/viewer/ViewerHeader';
 import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
 import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
+import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
+import { HelpCircle } from 'lucide-react';
 
 interface ViewerProps {
   onBack: () => void;
+  onStatsClick?: () => void;
 }
 
 /**
@@ -30,7 +34,7 @@ interface ViewerProps {
  *
  * This went from 516 lines to ~130 lines. Much easier to reason about.
  */
-export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
+export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick }) => {
   const { activeConversation, updateConversation, getAudioUrl } = useConversations();
 
   // Bail if no active conversation (shouldn't happen, but TypeScript safety)
@@ -106,6 +110,19 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
 
   // Auto-scroll to active segment during playback
   useAutoScroll(isPlaying, activeSegmentIndex, conversation.segments);
+
+  // Keyboard shortcuts (Space, ←/→, J/K, ?, Escape)
+  const {
+    showFirstTimeTooltip,
+    dismissTooltip,
+    helpModalOpen,
+    closeHelpModal
+  } = useKeyboardShortcuts({
+    togglePlay,
+    seekBack: () => seek(currentTime - 5000),
+    seekForward: () => seek(currentTime + 5000),
+    openHelp: () => {} // Modal state handled by hook
+  });
 
   /**
    * Handle speaker rename
@@ -191,12 +208,34 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
         createdAt={conversation.createdAt}
         isSyncing={isSyncing}
         onBack={onBack}
+        onStatsClick={onStatsClick}
         driftCorrectionApplied={driftCorrectionApplied}
         driftRatio={driftRatio}
         driftMs={driftMs}
         alignmentStatus={conversation.alignmentStatus}
         alignmentError={conversation.alignmentError}
       />
+
+      {/* First-time keyboard shortcuts tooltip */}
+      {showFirstTimeTooltip && (
+        <div className="fixed top-20 right-4 z-40 bg-slate-900 text-white text-sm rounded-lg p-4 shadow-xl max-w-xs animate-in fade-in slide-in-from-right duration-300">
+          <div className="flex items-start gap-3">
+            <HelpCircle size={20} className="text-blue-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold mb-1">Keyboard Shortcuts Available</p>
+              <p className="text-slate-300 text-xs mb-3">
+                Use Space to play/pause, arrow keys to seek, and ? to see all shortcuts.
+              </p>
+              <button
+                onClick={dismissTooltip}
+                className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded transition-colors"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Split */}
       <div className="flex-1 flex overflow-hidden">
@@ -249,6 +288,12 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack }) => {
           onSave={saveSpeakerName}
         />
       )}
+
+      {/* Keyboard Shortcuts Modal */}
+      <KeyboardShortcutsModal
+        isOpen={helpModalOpen}
+        onClose={closeHelpModal}
+      />
     </div>
   );
 };
