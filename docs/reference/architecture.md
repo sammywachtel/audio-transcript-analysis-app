@@ -10,8 +10,8 @@ Technical architecture of the Audio Transcript Analysis App.
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                    React Application                        ││
 │  │  ┌─────────┐  ┌─────────────────┐  ┌───────────────────┐    ││
-│  │  │  Auth   │  │  Conversation   │  │      Pages        │    ││
-│  │  │ Context │  │    Context      │  │ Library / Viewer  │    ││
+│  │  │  Auth   │  │  Conversation   │  │       Pages       │    ││
+│  │  │ Context │  │    Context      │  │Library/Viewer/Search│   ││
 │  │  └────┬────┘  └────────┬────────┘  └─────────────────┬─┘    ││
 │  │       │                │                              │     ││
 │  │       └────────────────┼──────────────────────────────┘     ││
@@ -65,7 +65,7 @@ Technical architecture of the Audio Transcript Analysis App.
 ### Frontend Layers
 
 ```
-Pages (Library, Viewer)
+Pages (Library, Viewer, Search)
         │
         ├── use contexts ────┐
         │                    │
@@ -73,14 +73,18 @@ Pages (Library, Viewer)
     Hooks              Contexts
     ├── useAudioPlayer      ├── AuthContext
     ├── usePersonMentions   └── ConversationContext
-    └── useTranscriptSelection
+    ├── useTranscriptSelection
+    ├── useSearch           (search orchestration)
+    ├── useSearchFilters    (filter state + URL sync)
+    └── useDebounce         (input debouncing)
         │
         └── use services ────┐
                              │
                              ▼
                         Services
                         ├── firestoreService
-                        └── storageService
+                        ├── storageService
+                        └── searchService   (search + filter logic)
                              │
                              ▼
                       Firebase SDK
@@ -96,6 +100,16 @@ audio-transcript-analysis-app/
 │   │   ├── UserMenu.tsx
 │   │   ├── ProtectedRoute.tsx
 │   │   └── AdminRoute.tsx  # Admin-only content gating
+│   ├── search/             # Search result and filter components
+│   │   ├── SearchResults.tsx        # Results container + pagination
+│   │   ├── ConversationResultCard.tsx # Grouped results per conversation
+│   │   ├── SegmentResult.tsx        # Individual segment match
+│   │   ├── ZeroResultsState.tsx     # Empty state with suggestions
+│   │   ├── FilterSidebar.tsx        # Desktop 300px filter sidebar
+│   │   ├── FilterBottomSheet.tsx    # Mobile bottom sheet with drag-to-dismiss
+│   │   ├── DateRangeFilter.tsx      # Date range preset/custom selector
+│   │   ├── SpeakerFilter.tsx        # Speaker checkbox filter with counts
+│   │   └── TopicFilter.tsx          # Topic checkbox filter with counts
 │   └── viewer/             # Transcript viewer components
 │       ├── AudioPlayer.tsx
 │       ├── Sidebar.tsx
@@ -109,18 +123,25 @@ audio-transcript-analysis-app/
 ├── hooks/                  # Custom React hooks
 │   ├── useAudioPlayer.ts
 │   ├── useAutoScroll.ts
+│   ├── useDebounce.ts      # Generic debounce for inputs
 │   ├── useMetrics.ts       # Observability data hooks
 │   ├── usePersonMentions.ts
+│   ├── useSearch.ts        # Search state + pagination + filter integration
+│   ├── useSearchFilters.ts # Filter state with URL/sessionStorage sync
 │   └── useTranscriptSelection.ts
 ├── pages/                  # Page components
 │   ├── Library.tsx         # Conversation list + upload
+│   ├── Search.tsx          # Full-text search across transcripts
 │   ├── Viewer.tsx          # Transcript viewer
 │   ├── AdminDashboard.tsx  # Admin dashboard with metrics, users, pricing
 │   └── UserStats.tsx       # Personal usage statistics
-├── services/               # Firebase services
+├── services/               # Firebase + app services
 │   ├── firestoreService.ts
 │   ├── storageService.ts
-│   └── metricsService.ts   # Observability queries
+│   ├── metricsService.ts   # Observability queries
+│   └── searchService.ts    # Client-side search logic
+├── utils/                  # Utility functions
+│   └── textHighlight.ts    # Snippet extraction + highlighting
 ├── components/
 │   ├── admin/              # Admin dashboard components
 │   │   └── PricingManager.tsx  # LLM pricing configuration
@@ -245,6 +266,51 @@ Cloud Function (transcribeAudio)
         ↓
 8. activeSegmentIndex updates, UI highlights
 ```
+
+### Search Flow
+
+```
+1. User navigates to /search or clicks Search button
+        ↓
+2. URL query params parsed (?q=term&dateRange=7d&speakers=A,B&topics=X)
+        ↓
+3. Search.tsx mounts, initializes from URL or sessionStorage
+        ↓
+4. useSearch + useSearchFilters hooks orchestrate:
+   ├── useDebounce (300ms) prevents search on every keystroke
+   ├── useSearchFilters manages filter state + URL/session sync
+   └── searchService.searchConversations() runs after debounce
+        ↓
+5. searchService (client-side) processes:
+   ├── Tokenizes query
+   ├── Searches all conversation segments (already in memory)
+   ├── Applies filters (date range, speakers, topics)
+   ├── Ranks matches by relevance
+   └── Extracts snippets with ~50-char context windows
+        ↓
+6. Results grouped by conversation, displayed with:
+   ├── Match counts per conversation
+   ├── Highlighted snippets (textHighlight.ts)
+   ├── Live speaker/topic counts from filtered results
+   └── "Load more" pagination (20 results per page)
+        ↓
+7. "Open in Viewer" → navigate to Viewer with targetSegmentId
+        ↓
+8. Viewer.tsx scrolls to segment + applies temporary highlight
+```
+
+**Filter UI (responsive):**
+- **Desktop**: 300px sticky sidebar with collapsible sections
+- **Mobile**: Bottom sheet triggered by "Filters (N)" button
+  - Drag-to-dismiss gesture (swipe down >80px to close)
+  - Backdrop click or Apply button also dismiss
+
+**Key Points:**
+- Search runs entirely client-side (no additional Firestore queries)
+- Uses conversations already loaded via ConversationContext
+- URL syncs with query AND filters for shareable search links
+- Browser back/forward restores full filter state
+- SessionStorage persists filters when navigating away and returning
 
 ### Two-Way Selection Sync
 

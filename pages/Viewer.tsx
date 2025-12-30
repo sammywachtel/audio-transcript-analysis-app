@@ -17,6 +17,7 @@ import { HelpCircle } from 'lucide-react';
 interface ViewerProps {
   onBack: () => void;
   onStatsClick?: () => void;
+  targetSegmentId?: string;
 }
 
 /**
@@ -34,7 +35,7 @@ interface ViewerProps {
  *
  * This went from 516 lines to ~130 lines. Much easier to reason about.
  */
-export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick }) => {
+export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegmentId }) => {
   const { activeConversation, updateConversation, getAudioUrl } = useConversations();
 
   // Bail if no active conversation (shouldn't happen, but TypeScript safety)
@@ -110,6 +111,26 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick }) => {
 
   // Auto-scroll to active segment during playback
   useAutoScroll(isPlaying, activeSegmentIndex, conversation.segments);
+
+  // Scroll to target segment if provided (from search deep-link)
+  useEffect(() => {
+    if (targetSegmentId) {
+      // Small delay to ensure DOM is ready
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`segment-${targetSegmentId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          // Briefly highlight the target segment
+          el.classList.add('ring-2', 'ring-blue-400', 'bg-blue-50');
+          setTimeout(() => {
+            el.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+          }, 2000);
+        }
+      }, 300);
+
+      return () => clearTimeout(timer);
+    }
+  }, [targetSegmentId]);
 
   // Keyboard shortcuts (Space, ←/→, J/K, ?, Escape)
   const {
