@@ -1,14 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
-import { LogOut, User as UserIcon } from 'lucide-react';
+import { LogOut, User as UserIcon, BarChart3 } from 'lucide-react';
+
+interface UserMenuProps {
+  onStatsClick?: () => void;
+}
 
 /**
  * UserMenu - Dropdown menu for authenticated users
  *
- * Shows user profile info (photo, name, email) and sign-out option.
+ * Shows user profile info (photo, name, email), My Stats link, and sign-out option.
  * Clicking outside the dropdown closes it automatically.
  */
-export const UserMenu: React.FC = () => {
+export const UserMenu: React.FC<UserMenuProps> = ({ onStatsClick }) => {
   const { user, signOut } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -115,6 +119,23 @@ export const UserMenu: React.FC = () => {
 
           {/* Actions */}
           <div className="py-1">
+            {onStatsClick && (
+              <button
+                onClick={() => {
+                  onStatsClick();
+                  setIsOpen(false);
+                }}
+                className={`
+                  w-full flex items-center gap-3 px-4 py-2
+                  text-sm text-slate-700
+                  hover:bg-slate-50 active:bg-slate-100
+                  transition-colors duration-150
+                `}
+              >
+                <BarChart3 className="w-4 h-4" />
+                <span>My Stats</span>
+              </button>
+            )}
             <button
               onClick={handleSignOut}
               className={`

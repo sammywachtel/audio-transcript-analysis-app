@@ -11,6 +11,7 @@ interface ViewerHeaderProps {
   createdAt: string;
   isSyncing: boolean;
   onBack: () => void;
+  onStatsClick?: () => void;
   // Drift correction metrics (for legacy display)
   driftCorrectionApplied?: boolean;
   driftRatio?: number;
@@ -31,6 +32,7 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
   createdAt,
   isSyncing,
   onBack,
+  onStatsClick,
   driftCorrectionApplied,
   driftRatio,
   driftMs,
@@ -114,7 +116,7 @@ export const ViewerHeader: React.FC<ViewerHeaderProps> = ({
         <button className="p-2 hover:bg-slate-100 rounded text-slate-500">
           <MoreHorizontal size={20} />
         </button>
-        <UserMenu />
+        <UserMenu onStatsClick={onStatsClick} />
       </div>
     </header>
   );
