@@ -1,5 +1,5 @@
 import React from 'react';
-import { Conversation, Speaker, TermOccurrence } from '../../types';
+import { Conversation } from '../../types';
 import { TranscriptSegment } from './TranscriptSegment';
 import { TopicMarker } from './TopicMarker';
 

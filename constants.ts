@@ -1,7 +1,7 @@
 import { Conversation } from './types';
 
-// Helper to generate IDs
-const id = (prefix: string) => `${prefix}_${Math.random().toString(36).substr(2, 9)}`;
+// Helper to generate IDs (used in mock data below)
+const _id = (prefix: string) => `${prefix}_${Math.random().toString(36).substr(2, 9)}`;
 
 export const MOCK_CONVERSATION: Conversation = {
   conversationId: 'c_demo_123',

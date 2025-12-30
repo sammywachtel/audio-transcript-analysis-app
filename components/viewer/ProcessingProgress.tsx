@@ -48,7 +48,7 @@ const CATEGORY_ICONS: Record<StepMeta['category'], typeof Loader2> = {
  * Infer category from step for backward compatibility with legacy data
  * (when stepMeta is not present)
  */
-function inferCategory(step: ProcessingStep): StepMeta['category'] {
+function _inferCategory(step: ProcessingStep): StepMeta['category'] {
   switch (step) {
     case ProcessingStep.PENDING:
       return 'pending';

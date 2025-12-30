@@ -18,8 +18,7 @@ import {
   orderBy,
   limit,
   where,
-  Timestamp,
-  DocumentData
+  Timestamp
 } from 'firebase/firestore';
 import { db } from '../firebase-config';
 

@@ -2,7 +2,6 @@ import React from 'react';
 import { ConversationSearchResult, SegmentMatch } from '../../services/searchService';
 import { SegmentResult } from './SegmentResult';
 import { FileAudio, ChevronDown, ChevronRight } from 'lucide-react';
-import { cn } from '../../utils';
 import { Conversation } from '../../types';
 
 interface ConversationResultCardProps {

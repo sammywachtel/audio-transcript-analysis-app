@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Term, Person } from '../../types';
 import { cn } from '../../utils';
-import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight, Hash } from 'lucide-react';
+import { BookOpen, Search, Users, User, StickyNote, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface SidebarProps {
   terms: Term[];
