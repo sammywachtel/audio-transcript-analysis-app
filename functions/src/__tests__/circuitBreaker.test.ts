@@ -2,15 +2,16 @@
  * Unit tests for circuit breaker
  */
 
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CircuitBreaker } from '../circuitBreaker';
 
 // Mock the logger to avoid actual logging during tests
-jest.mock('../logger', () => ({
+vi.mock('../logger', () => ({
   log: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn()
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn()
   }
 }));
 
@@ -38,7 +39,7 @@ describe('CircuitBreaker', () => {
   });
 
   it('should transition to open after failureThreshold failures', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
 
     // First failure
     await expect(circuit.execute(failingFn)).rejects.toThrow('Service down');
@@ -50,7 +51,7 @@ describe('CircuitBreaker', () => {
   });
 
   it('should block requests when circuit is open', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -64,8 +65,8 @@ describe('CircuitBreaker', () => {
   });
 
   it('should call fallback when circuit is open', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
-    const fallbackFn = jest.fn().mockResolvedValue('fallback result');
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
+    const fallbackFn = vi.fn().mockResolvedValue('fallback result');
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -78,7 +79,7 @@ describe('CircuitBreaker', () => {
   });
 
   it('should transition to half-open after resetTimeout', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -95,8 +96,8 @@ describe('CircuitBreaker', () => {
   });
 
   it('should transition to closed after halfOpenRequests successes', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
-    const successFn = jest.fn().mockResolvedValue('success');
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
+    const successFn = vi.fn().mockResolvedValue('success');
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -116,7 +117,7 @@ describe('CircuitBreaker', () => {
   });
 
   it('should transition back to open if request fails in half-open state', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -134,7 +135,7 @@ describe('CircuitBreaker', () => {
   });
 
   it('should reset circuit manually', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
 
     // Trigger circuit open
     await expect(circuit.execute(failingFn)).rejects.toThrow();
@@ -152,8 +153,8 @@ describe('CircuitBreaker', () => {
   });
 
   it('should track total requests and failures', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
-    const successFn = jest.fn().mockResolvedValue('success');
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
+    const successFn = vi.fn().mockResolvedValue('success');
 
     // Mix of successes and failures
     await circuit.execute(successFn);
@@ -166,8 +167,8 @@ describe('CircuitBreaker', () => {
   });
 
   it('should reset failure count after success in closed state', async () => {
-    const failingFn = jest.fn().mockRejectedValue(new Error('Service down'));
-    const successFn = jest.fn().mockResolvedValue('success');
+    const failingFn = vi.fn().mockRejectedValue(new Error('Service down'));
+    const successFn = vi.fn().mockResolvedValue('success');
 
     // One failure
     await expect(circuit.execute(failingFn)).rejects.toThrow();
