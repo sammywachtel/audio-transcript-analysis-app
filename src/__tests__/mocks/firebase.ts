@@ -63,7 +63,7 @@ export const mockFirebaseAuth = {
   onAuthStateChanged: vi.fn((
     _auth: any,
     callback: (user: User | null) => void,
-    errorCallback?: (error: Error) => void
+    _errorCallback?: (error: Error) => void
   ) => {
     authStateListeners.push(callback);
 

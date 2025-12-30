@@ -3,7 +3,7 @@ import { Conversation } from '../types';
 import { formatTime, cn, createMockConversation } from '../utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, CheckCircle2, Settings, BarChart3, Search } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, Settings, BarChart3, Search } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgressRow } from '../components/library/ProcessingProgressRow';
@@ -37,7 +37,7 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
     }
   };
 
-  const handleAbort = async (e: React.MouseEvent, conv: Conversation) => {
+  const _handleAbort = async (e: React.MouseEvent, conv: Conversation) => {
     e.stopPropagation();
     setAbortConfirmConv(conv);
   };

@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { ProtectedRoute } from '../../../components/auth/ProtectedRoute';
 import { renderWithAuth } from '../utils/test-utils';
@@ -399,7 +399,7 @@ describe('ProtectedRoute', () => {
 
   describe('Accessibility', () => {
     it('should have proper ARIA roles in loading state', () => {
-      const { container } = renderWithAuth(
+      renderWithAuth(
         <ProtectedRoute>
           <div>Protected Content</div>
         </ProtectedRoute>

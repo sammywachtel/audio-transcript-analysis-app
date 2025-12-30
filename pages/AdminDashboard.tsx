@@ -17,7 +17,6 @@
 import React, { useState } from 'react';
 import { Button } from '../components/Button';
 import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap } from 'lucide-react';
-import { formatTime } from '../utils';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
 // Hooks
@@ -35,7 +34,6 @@ import {
   StatCardSkeleton,
   TimeSeriesChart,
   TimeSeriesChartSkeleton,
-  LLMUsageList,
   MetricsTable,
   MetricsTableSkeleton
 } from '../components/metrics';

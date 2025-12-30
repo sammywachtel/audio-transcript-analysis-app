@@ -1,4 +1,4 @@
-import { afterEach, vi, beforeAll } from 'vitest';
+import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
@@ -12,7 +12,7 @@ vi.mock('firebase/auth', async () => {
   const { mockFirebaseAuth } = await import('./mocks/firebase');
 
   class GoogleAuthProvider {
-    static credentialFromResult = vi.fn((result: any) => ({
+    static credentialFromResult = vi.fn((_result: any) => ({
       accessToken: 'mock-access-token',
       idToken: 'mock-id-token',
       providerId: 'google.com'

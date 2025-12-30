@@ -11,7 +11,7 @@
 
 import React from 'react';
 import { Button } from '../components/Button';
-import { ArrowLeft, Loader2, FileAudio, Clock, DollarSign, Activity, BarChart3 } from 'lucide-react';
+import { ArrowLeft, FileAudio, Clock, DollarSign, Activity, BarChart3 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useMyStats, useRecentMetrics } from '../hooks/useMetrics';
 import {
@@ -20,7 +20,6 @@ import {
   MetricsTable,
   MetricsTableSkeleton
 } from '../components/metrics';
-import { formatUsd } from '../services/metricsService';
 import { CostIndicator } from '../components/shared/CostIndicator';
 
 interface UserStatsProps {
@@ -29,7 +28,7 @@ interface UserStatsProps {
 
 export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
   const { user } = useAuth();
-  const { data: stats, loading: statsLoading, error: statsError, refetch } = useMyStats();
+  const { data: stats, loading: statsLoading, error: statsError } = useMyStats();
   // Always pass user ID - even for admins, "My Usage Stats" shows their own stats
   const { data: recentMetrics, loading: metricsLoading } = useRecentMetrics({
     userId: user?.uid,

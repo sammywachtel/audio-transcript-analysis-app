@@ -119,7 +119,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected to fail
         }
       });
@@ -217,7 +217,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -241,7 +241,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -265,7 +265,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -290,7 +290,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -314,7 +314,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -338,7 +338,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });
@@ -363,7 +363,7 @@ describe('AuthContext', () => {
       await act(async () => {
         try {
           await result.current.signInWithGoogle();
-        } catch (e) {
+        } catch {
           // Expected
         }
       });

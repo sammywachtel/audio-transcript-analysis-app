@@ -139,7 +139,7 @@ export const useAudioPlayer = (
     audioRef.current = audio;
 
     // Error handler - ignore expected cleanup errors
-    const errorHandler = (e: Event) => {
+    const errorHandler = (_e: Event) => {
       const error = audio.error;
       // Code 4 = MEDIA_ELEMENT_ERROR (usually from clearing src during cleanup)
       // Only log unexpected errors

@@ -14,7 +14,7 @@ import { collection, addDoc, Timestamp } from 'firebase/firestore';
 import { db } from '../../firebase-config';
 import { Button } from '../Button';
 import { usePricingConfigs } from '../../hooks/useMetrics';
-import { PricingConfig, formatUsd } from '../../services/metricsService';
+import { PricingConfig } from '../../services/metricsService';
 import { Plus, X, Loader2, DollarSign, RefreshCw, AlertCircle } from 'lucide-react';
 import { cn } from '../../utils';
 

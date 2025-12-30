@@ -1,7 +1,6 @@
 import { initializeApp, FirebaseApp } from 'firebase/app';
 import { getAuth, Auth, GoogleAuthProvider, connectAuthEmulator } from 'firebase/auth';
 import {
-  getFirestore,
   Firestore,
   initializeFirestore,
   persistentLocalCache,

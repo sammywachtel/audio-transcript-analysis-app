@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { X, Play, Pause, SkipBack, SkipForward, HelpCircle } from 'lucide-react';
+import { X, Play, SkipBack, SkipForward, HelpCircle } from 'lucide-react';
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;

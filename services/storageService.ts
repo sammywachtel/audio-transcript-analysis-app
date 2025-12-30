@@ -5,7 +5,6 @@ import {
   getDownloadURL,
   deleteObject,
   getMetadata,
-  UploadResult,
   UploadTask
 } from 'firebase/storage';
 import { storage } from '../firebase-config';
@@ -218,7 +217,7 @@ export class StorageService {
    * For production, this should be done via a Cloud Function that
    * lists and deletes files in batches.
    */
-  async deleteAllUserAudio(userId: string): Promise<void> {
+  async deleteAllUserAudio(_userId: string): Promise<void> {
     console.warn(
       '[Storage] deleteAllUserAudio not implemented - requires Cloud Function for listing files'
     );
