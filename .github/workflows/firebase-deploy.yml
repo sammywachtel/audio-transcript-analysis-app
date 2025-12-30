@@ -86,20 +86,21 @@ jobs:
           firebase use ${{ env.FIREBASE_PROJECT_ID }}
 
       # Build Cloud Functions (only if deploying functions)
+      # On push events, always build. On manual dispatch, skip only if rules-only selected.
       - name: Install Functions dependencies
-        if: github.event.inputs.deploy_target != 'rules-only'
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
         working-directory: functions
         run: npm ci
 
       - name: Build Cloud Functions
-        if: github.event.inputs.deploy_target != 'rules-only'
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
         working-directory: functions
         run: npm run build
 
       # Configure service agent IAM bindings (required for Cloud Functions v2 with Storage triggers)
       # These service agents are created lazily, so we configure them on every deploy to ensure they exist
       - name: Configure Service Agent IAM Bindings
-        if: github.event.inputs.deploy_target != 'rules-only'
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
         run: |
           echo "Configuring service agent IAM bindings..."
           PROJECT_ID="${{ env.FIREBASE_PROJECT_ID }}"
@@ -146,7 +147,7 @@ jobs:
       # Note: Using printf instead of echo to avoid trailing newlines in secrets
       # Only sets secrets that are non-empty to avoid "Secret Payload cannot be empty" errors
       - name: Set Firebase Function Secrets
-        if: github.event.inputs.deploy_target != 'rules-only'
+        if: github.event_name == 'push' || github.event.inputs.deploy_target != 'rules-only'
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
           REPLICATE_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
