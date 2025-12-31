@@ -63,9 +63,14 @@ npm run backend:dev   # Backend only (port 8001)
 
 ### 2. Make Your Changes
 
-- Edit files in `frontend/src/` for React components
-- Edit files in `backend/app/` for API endpoints
-- Write tests as you develop (mandatory for all features)
+- Edit files in `src/` for React components, pages, hooks, services, etc.
+  - Entry point: `src/main.tsx`
+  - Configuration: `src/config/` (firebase-config.ts, types.ts, constants.ts)
+  - Components: `src/components/`
+  - Pages: `src/pages/`
+  - Services: `src/services/`
+  - Hooks: `src/hooks/`
+- Write tests in `src/__tests__/` as you develop (mandatory for all features)
 
 ### 3. Quality Gate Validation
 
@@ -248,21 +253,29 @@ npm test -- --no-coverage --verbose ComponentName.test.tsx
 ## File Structure Reference
 
 ```
-lyrics/
+audio-transcript-analysis-app/
 ├── .pre-commit-config.yaml    # Pre-commit hook configuration
 ├── setup-dev.sh               # One-command environment setup
-├── .github/workflows/lint.yml # CI validation pipeline
-├── frontend/                  # React TypeScript frontend
-│   ├── src/components/        # React components
-│   │   └── __tests__/         # Component tests
-│   ├── src/utils/             # Utility functions
-│   │   └── __tests__/         # Utility tests
-│   └── package.json           # Frontend dependencies
-├── backend/                   # FastAPI Python backend
-│   ├── .venv/                 # Python virtual environment (auto-created)
-│   ├── app/                   # Backend application code
-│   └── requirements.txt       # Python dependencies
-└── package.json               # Root scripts and tooling
+├── .github/workflows/         # CI/CD pipelines
+├── src/                       # React frontend source
+│   ├── components/            # React components
+│   ├── pages/                 # Page components
+│   ├── contexts/              # React contexts
+│   ├── hooks/                 # Custom hooks
+│   ├── services/              # Firebase services
+│   ├── utils/                 # Helper functions
+│   ├── config/                # Configuration files
+│   │   ├── firebase-config.ts # Firebase initialization
+│   │   ├── types.ts           # TypeScript types
+│   │   └── constants.ts       # App constants
+│   ├── styles/                # CSS styles
+│   ├── __tests__/             # Tests (components, hooks, services, utils)
+│   ├── App.tsx                # Main app component
+│   └── main.tsx               # Entry point (formerly index.tsx)
+├── functions/                 # Cloud Functions (Node.js)
+│   └── src/                   # Function source code
+├── docs/                      # Documentation (Diátaxis)
+└── package.json               # Dependencies and scripts
 ```
 
 ## Team Workflow Summary

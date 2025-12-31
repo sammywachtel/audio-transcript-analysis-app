@@ -12,6 +12,10 @@ vi.mock('firebase/auth', async () => {
   const { mockFirebaseAuth } = await import('./mocks/firebase');
 
   class GoogleAuthProvider {
+    // Instance methods that firebase-config.ts calls
+    addScope = vi.fn(() => this);
+    setCustomParameters = vi.fn(() => this);
+
     static credentialFromResult = vi.fn((_result: any) => ({
       accessToken: 'mock-access-token',
       idToken: 'mock-id-token',
@@ -30,7 +34,7 @@ vi.mock('firebase/auth', async () => {
 });
 
 // Mock firebase-config to prevent initialization errors
-vi.mock('../../firebase-config', () => ({
+vi.mock('@/config/firebase-config', () => ({
   auth: {},
   googleProvider: {},
   db: {},
@@ -39,7 +43,7 @@ vi.mock('../../firebase-config', () => ({
 }));
 
 // Mock Firestore service
-vi.mock('../../services/firestoreService', () => ({
+vi.mock('@/services/firestoreService', () => ({
   firestoreService: {
     subscribeToUserConversations: vi.fn(() => () => {}), // Returns unsubscribe function
     save: vi.fn(),
@@ -50,7 +54,7 @@ vi.mock('../../services/firestoreService', () => ({
 }));
 
 // Mock Storage service
-vi.mock('../../services/storageService', () => ({
+vi.mock('@/services/storageService', () => ({
   storageService: {
     uploadAudio: vi.fn(),
     getAudioUrl: vi.fn(),

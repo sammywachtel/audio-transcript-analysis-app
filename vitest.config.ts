@@ -17,8 +17,7 @@ export default defineConfig({
         'node_modules/',
         'src/__tests__/',
         '**/*.test.{ts,tsx}',
-        '**/types.ts',
-        '**/constants.ts',
+        'src/config/**',
         'vite.config.ts',
         'vitest.config.ts'
       ]

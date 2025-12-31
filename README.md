@@ -150,39 +150,54 @@ Firebase secrets (stored via Firebase Secret Manager):
 
 ```
 audio-transcript-analysis-app/
-├── components/              # React components
-│   ├── auth/               # SignInButton, UserMenu, ProtectedRoute, AdminRoute
-│   └── viewer/             # TranscriptSegment, AudioPlayer, Sidebar, etc.
-├── contexts/               # React contexts
-│   ├── AuthContext.tsx     # Firebase Auth state + isAdmin role
-│   └── ConversationContext.tsx  # Real-time Firestore subscription
-├── hooks/                  # Custom React hooks
-│   ├── useAudioPlayer.ts   # Playback, seeking, drift correction
-│   ├── useAutoScroll.ts    # Auto-scroll to active segment
-│   ├── usePersonMentions.ts # Person name detection
-│   └── useTranscriptSelection.ts # Two-way transcript/sidebar sync
-├── pages/                  # Page components
-│   ├── Library.tsx         # Conversation list + upload
-│   ├── Viewer.tsx          # Main transcript viewer
-│   └── AdminDashboard.tsx  # Processing metrics (admin-only)
-├── services/               # Firebase services
-│   ├── firestoreService.ts # Firestore CRUD + real-time listeners
-│   └── storageService.ts   # Audio upload/download
-├── functions/              # Cloud Functions (Node.js)
+├── src/                    # React frontend source
+│   ├── components/         # React components
+│   │   ├── auth/          # SignInButton, UserMenu, ProtectedRoute, AdminRoute
+│   │   ├── viewer/        # TranscriptSegment, AudioPlayer, Sidebar, etc.
+│   │   ├── search/        # Search results components
+│   │   ├── library/       # Library page components
+│   │   └── admin/         # Admin dashboard components
+│   ├── contexts/          # React contexts
+│   │   ├── AuthContext.tsx            # Firebase Auth state + isAdmin role
+│   │   └── ConversationContext.tsx    # Real-time Firestore subscription
+│   ├── hooks/             # Custom React hooks
+│   │   ├── useAudioPlayer.ts          # Playback, seeking, drift correction
+│   │   ├── useAutoScroll.ts           # Auto-scroll to active segment
+│   │   ├── usePersonMentions.ts       # Person name detection
+│   │   └── useTranscriptSelection.ts  # Two-way transcript/sidebar sync
+│   ├── pages/             # Page components
+│   │   ├── Library.tsx    # Conversation list + upload
+│   │   ├── Viewer.tsx     # Main transcript viewer
+│   │   ├── Search.tsx     # Full-text search
+│   │   ├── AdminDashboard.tsx  # Processing metrics (admin-only)
+│   │   └── UserStats.tsx  # User usage statistics
+│   ├── services/          # Firebase services
+│   │   ├── firestoreService.ts  # Firestore CRUD + real-time listeners
+│   │   ├── storageService.ts    # Audio upload/download
+│   │   ├── searchService.ts     # Client-side search
+│   │   └── chatService.ts       # Chat integration
+│   ├── utils/             # Helper functions
+│   ├── config/            # Configuration files
+│   │   ├── firebase-config.ts  # Firebase initialization
+│   │   ├── types.ts            # TypeScript types
+│   │   └── constants.ts        # App constants
+│   ├── styles/            # CSS styles
+│   │   └── globals.css    # Global styles
+│   ├── App.tsx            # Main app component
+│   └── main.tsx           # Entry point
+├── functions/             # Cloud Functions (Node.js)
 │   └── src/
-│       ├── index.ts        # Function exports
-│       ├── transcribe.ts   # WhisperX + Gemini analysis + speaker corrections
-│       ├── alignment.ts    # WhisperX integration via Replicate
-│       ├── metrics.ts      # Processing metrics recording
-│       └── logger.ts       # Structured logging utility
-├── docs/                   # Documentation (Diátaxis structure)
-│   ├── tutorials/          # Getting started guides
-│   ├── how-to/             # Task-oriented guides
-│   ├── reference/          # Technical reference
-│   └── explanation/        # Design decisions
-├── types.ts                # TypeScript types
-├── utils.ts                # Helper functions
-└── firebase-config.ts      # Firebase initialization
+│       ├── index.ts       # Function exports
+│       ├── transcribe.ts  # WhisperX + Gemini analysis + speaker corrections
+│       ├── alignment.ts   # WhisperX integration via Replicate
+│       ├── metrics.ts     # Processing metrics recording
+│       └── logger.ts      # Structured logging utility
+├── docs/                  # Documentation (Diátaxis structure)
+│   ├── tutorials/         # Getting started guides
+│   ├── how-to/            # Task-oriented guides
+│   ├── reference/         # Technical reference
+│   └── explanation/       # Design decisions
+└── ...config files
 ```
 
 ## Timestamp Alignment

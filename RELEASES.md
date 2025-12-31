@@ -4,6 +4,39 @@ This document tracks all releases of the Audio Transcript Analysis App.
 
 ---
 
+## v1.6.0-beta (2025-12-31)
+
+### Added
+- **Chat History Persistence** - Chat conversations now persist to Firestore
+  - Messages survive page reloads and work across devices
+  - Pagination with "Load older messages" (10 at a time)
+  - 50 message limit per conversation with visual warnings
+  - Export chat as JSON with full metadata
+  - Clear history with confirmation modal
+- **New `useChatHistory` hook** - Real-time Firestore sync for chat state
+- **New `ChatHistory` component** - Message display with load-more and controls
+- **How-to guide** - `docs/how-to/using-chat.md` for chat feature
+
+### Changed
+- **Project restructure** - All source files moved into `src/` directory
+  - `components/` → `src/components/`
+  - `hooks/` → `src/hooks/`
+  - `pages/` → `src/pages/`
+  - `services/` → `src/services/`
+  - `contexts/` → `src/contexts/`
+  - `types.ts`, `constants.ts`, `firebase-config.ts` → `src/config/`
+  - `utils.ts` → `src/utils/index.ts`
+  - `index.tsx` → `src/main.tsx`
+- Updated all import paths to use `@/` alias
+- Updated Vite, TypeScript, and Vitest configs for new structure
+
+### Technical Details
+- Chat history stored as subcollection: `conversations/{id}/chatHistory/{messageId}`
+- `chatHistoryService.ts` provides full CRUD + real-time listeners
+- Architecture and data model docs updated to reflect new structure
+
+---
+
 ## v1.5.0-beta (2025-12-29)
 
 ### Fixed

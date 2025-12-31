@@ -425,14 +425,29 @@ Viewer.tsx
 ```
 
 **State Management:**
-1. **useChat Hook** (`hooks/useChat.ts`):
-   - Maintains message history per conversation
-   - Manages draft input (persists across tab switches)
-   - Handles optimistic updates (add user message immediately)
-   - Calls chatService.sendChatMessage()
-   - Resets on conversationId change
+1. **useChatHistory Hook** (`hooks/useChatHistory.ts`):
+   - Real-time Firestore listener for message synchronization
+   - Loads most recent 10 messages initially
+   - Provides `loadOlder()` for pagination (batches of 10)
+   - Tracks message count for 50 message limit enforcement
+   - Automatic cleanup on conversation change/unmount
+   - Works across devices (messages sync in real-time)
 
-2. **Chat Service** (`services/chatService.ts`):
+2. **useChat Hook** (`hooks/useChat.ts`):
+   - Manages draft input (persists across tab switches)
+   - Handles message sending and persistence
+   - Checks message count limit (50 messages per conversation)
+   - Calls chatHistoryService to persist both user and assistant messages
+   - Error handling and loading states
+
+3. **Chat History Service** (`services/chatHistoryService.ts`):
+   - Firestore CRUD for `conversations/{id}/chatHistory` subcollection
+   - Real-time subscriptions with pagination support
+   - Batch deletion for clear history
+   - Export to JSON with clean formatting
+   - Message count tracking for limit enforcement
+
+4. **Chat Service** (`services/chatService.ts`):
    - Wrapper around Firebase callable: `httpsCallable(functions, 'chatWithConversation')`
    - Client-side validation (message length, empty check)
    - Error transformation from Firebase error codes
@@ -441,23 +456,35 @@ Viewer.tsx
 ```
 1. User clicks Chat tab in Sidebar
         ↓
-2. Empty state shows example questions
+2. useChatHistory subscribes to Firestore chatHistory subcollection
         ↓
-3. User types question in ChatInput
+3. Most recent 10 messages loaded from Firestore
         ↓
-4. Press Enter → sendMessage() called
+4. If no messages, empty state shows example questions
         ↓
-5. User message added optimistically to UI
+5. User types question in ChatInput
         ↓
-6. Loading spinner appears
+6. Press Enter → sendMessage() called
         ↓
-7. Backend processes request (see Chat Flow above)
+7. User message persisted to Firestore via chatHistoryService
         ↓
-8. Assistant response added to message list
+8. Real-time listener adds user message to UI instantly
         ↓
-9. Timestamp sources rendered as clickable links
+9. Loading spinner appears
         ↓
-10. Click timestamp → scroll to segment + seek audio
+10. Backend processes request (see Chat Flow above)
+        ↓
+11. Assistant response persisted to Firestore via chatHistoryService
+        ↓
+12. Real-time listener adds assistant response to UI
+        ↓
+13. Timestamp sources rendered as clickable links
+        ↓
+14. Click timestamp → scroll to segment + seek audio
+        ↓
+15. If user has older messages, "Load older" button appears
+        ↓
+16. Click "Load older" → previous 10 messages loaded
 ```
 
 **Timestamp Citations:**
@@ -477,12 +504,26 @@ Viewer.tsx
 **Error Handling:**
 - Rate limit exceeded → dismissible error banner
 - Network errors → dismissible error banner
-- Failed messages removed from optimistic UI
+- Failed messages do not persist to Firestore
 
-**State Persistence:**
-- Draft input persists when switching tabs
-- Message history resets when changing conversations
-- Tab state (activeTab) local to Sidebar component
+**Chat History Persistence:**
+- Messages stored in Firestore `conversations/{id}/chatHistory` subcollection
+- Real-time synchronization across tabs and devices
+- Survives page reloads and browser restarts
+- Automatically cleaned up when parent conversation is deleted
+- Draft input persists when switching tabs (in-memory only)
+
+**Message Limits:**
+- 50 message limit per conversation (user + assistant combined)
+- Warning indicator at 45 messages (yellow badge)
+- Blocking indicator at 50 messages (red badge + disabled input)
+- Clear history resets count to 0
+
+**Chat History Controls:**
+- **Export**: Downloads all messages as JSON with metadata
+- **Clear**: Batch deletes all messages (with confirmation modal)
+- **Load Older**: Pagination for loading previous messages (10 at a time)
+- Message count display: `X/50` with color-coded warnings
 
 ### Two-Way Selection Sync
 
