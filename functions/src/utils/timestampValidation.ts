@@ -5,7 +5,7 @@
  * Uses fuzzy matching with tolerance to handle slight variations in timestamps.
  */
 
-import type { Segment } from '../../../types';
+import type { Segment } from '../types';
 
 export interface TimestampSource {
   segmentId: string;

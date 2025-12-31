@@ -6,6 +6,7 @@ import { usePersonMentions } from '../hooks/usePersonMentions';
 import { useTranscriptSelection } from '../hooks/useTranscriptSelection';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { useChat } from '../hooks/useChat';
 import { ViewerHeader } from '../components/viewer/ViewerHeader';
 import { TranscriptView } from '../components/viewer/TranscriptView';
 import { Sidebar } from '../components/viewer/Sidebar';
@@ -145,6 +146,17 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     openHelp: () => {} // Modal state handled by hook
   });
 
+  // Chat state management
+  const {
+    messages: chatMessages,
+    draftInput: chatDraftInput,
+    setDraftInput: chatSetDraftInput,
+    isLoading: chatIsLoading,
+    error: chatError,
+    sendMessage: chatSendMessage,
+    clearError: chatClearError
+  } = useChat({ conversationId: conversation.conversationId });
+
   /**
    * Handle speaker rename
    */
@@ -221,6 +233,17 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     }
   }, []);
 
+  /**
+   * Handle timestamp click from chat messages
+   * Navigates to segment and seeks audio
+   */
+  const handleChatTimestampClick = useCallback((segmentId: string, startMs: number) => {
+    // Scroll to segment
+    handleNavigateToSegment(segmentId);
+    // Seek audio to timestamp
+    seek(startMs);
+  }, [handleNavigateToSegment, seek]);
+
   return (
     <div className="flex flex-col h-screen bg-slate-50">
       {/* Header */}
@@ -284,7 +307,18 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             onPersonSelect={handlePersonClickInSidebar}
             onUpdatePerson={handleUpdatePerson}
             personMentions={mentionsMap}
-            onNavigateToSegment={handleNavigateToSegment}
+            onNavigateToSegment={handleChatTimestampClick}
+            // Chat props
+            chatMessages={chatMessages}
+            chatDraftInput={chatDraftInput}
+            chatSetDraftInput={chatSetDraftInput}
+            chatOnSendMessage={chatSendMessage}
+            chatIsLoading={chatIsLoading}
+            chatError={chatError}
+            chatOnClearError={chatClearError}
+            conversationTitle={conversation.title}
+            conversationDurationMs={conversation.durationMs}
+            speakers={conversation.speakers}
           />
         </div>
       </div>

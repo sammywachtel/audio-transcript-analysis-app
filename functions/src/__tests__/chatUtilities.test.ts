@@ -10,7 +10,7 @@ import { describe, it, expect } from '@jest/globals';
 import { buildChatPrompt } from '../utils/promptBuilder';
 import { validateTimestampSources, extractSegmentIndices } from '../utils/timestampValidation';
 import { calculateChatCost, classifyQueryType } from '../utils/chatMetrics';
-import type { Conversation, Segment, Speaker } from '../../../types';
+import type { Conversation, Segment, Speaker } from '../types';
 
 describe('Chat Utilities', () => {
   describe('buildChatPrompt', () => {

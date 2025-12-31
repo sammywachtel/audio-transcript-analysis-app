@@ -119,6 +119,19 @@ Open http://localhost:3000 in your browser.
 5. Wait for processing (handled by Cloud Functions)
 6. View your interactive transcript!
 
+### Try the Chat Feature
+
+Once your transcript is ready:
+
+1. Open the transcript viewer
+2. Click the **Chat** tab in the sidebar (on desktop)
+3. Ask questions about your transcript:
+   - "What are the main topics discussed?"
+   - "Who are the key people mentioned?"
+   - "What decisions were made?"
+4. Get AI-powered answers with clickable timestamp citations
+5. Click timestamp links to jump to relevant parts of the conversation
+
 ## What's Happening Under the Hood
 
 ```

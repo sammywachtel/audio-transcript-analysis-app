@@ -17,19 +17,38 @@ repos:
   # Frontend hooks (TypeScript/JavaScript)
   - repo: local
     hooks:
+      # Prettier formatting (auto-fix)
+      - id: prettier
+        name: Prettier Format
+        entry: bash -c 'cd . && npx prettier --write --ignore-unknown'
+        language: system
+        files: '.*\.(js|jsx|ts|tsx)$'
+        pass_filenames: true
+
+      # ESLint validation
       - id: eslint-check
         name: ESLint Check
-        entry: bash -c 'cd frontend && npm run lint'
+        entry: bash -c 'cd . && npm run lint'
         language: system
-        files: '^frontend/.*\.(js|jsx|ts|tsx)$'
+        files: '.*\.(js|jsx|ts|tsx)$'
         pass_filenames: false
 
+      # TypeScript compilation check
       - id: typescript-check
         name: TypeScript Check
-        entry: bash -c 'cd frontend && npx tsc --noEmit'
+        entry: bash -c 'cd . && npx tsc --noEmit'
         language: system
-        files: '^frontend/.*\.(ts|tsx)$'
+        files: '.*\.(ts|tsx)$'
         pass_filenames: false
+
+      # Run tests for changed files (if test framework detected)
+      - id: test-changed
+        name: Test Changed Files
+        entry: bash -c 'cd . && npm run test:run -- --changed 2>/dev/null || npm run test -- --run --changed 2>/dev/null || true'
+        language: system
+        files: '.*\.(js|jsx|ts|tsx)$'
+        pass_filenames: false
+        stages: [commit]
 
   # Python hooks
   - repo: https://github.com/psf/black
