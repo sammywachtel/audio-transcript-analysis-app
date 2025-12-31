@@ -7,7 +7,7 @@
  * - Strict instructions for timestamp-backed answers
  */
 
-import type { Conversation, Segment, Topic, Term, Person } from '../../../types';
+import type { Conversation, Segment, Topic, Term, Person } from '../types';
 
 /**
  * Build a chat prompt that includes full transcript context

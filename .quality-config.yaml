@@ -9,7 +9,7 @@ quality_gates:
   current_phase: 3  # 0=Baseline, 1=Changed-only, 2=Ratchet, 3=Strict
   recommended_phase: 0  # Auto-calculated based on project analysis
   auto_progression: false       # Automatic phase advancement (typically false)
-  last_updated: "2025-12-16 18:59:24"
+  last_updated: "2025-12-30 16:15:20"
 
   # Phase-specific behaviors
   phases:
@@ -38,16 +38,16 @@ quality_gates:
 # PROJECT STRUCTURE (Auto-detected, user-customizable)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 project:
-  type: "typescript"
+  type: "frontend-typescript"
   name: "audio-transcript-analysis-app"
   structure:
-    has_frontend: false
+    has_frontend: true
     has_backend: false
     has_python: true
     has_typescript: true
     has_javascript: true
     has_tests: true
-    frontend_path: ""
+    frontend_path: "."
     backend_path: ""
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -56,9 +56,9 @@ project:
 tools:
   # Frontend tools (enabled if frontend detected)
   frontend:
-    enabled: false
+    enabled: true
     eslint:
-      enabled: false
+      enabled: true
       auto_fix: true
       phase_0_enforce: false      # Only if already zero errors
       phase_1_enforce: true       # Strict for changed files
@@ -72,7 +72,7 @@ tools:
       phase_2_enforce: true       # Repository-wide
       phase_3_enforce: true       # Maximum strictness
     testing:
-      unit_tests: false  # Enable test execution in validation
+      unit_tests: true  # Enable test execution in validation
 
   # Backend tools (enabled if Python detected)
   backend:
@@ -123,7 +123,7 @@ testing:
     enabled: auto                # Auto-enable if detected
     required_for_phase_3: true   # Must have integration tests for Phase 3
   e2e:
-    enabled: false
+    enabled: true
     required_for_phase_3: true   # Must have E2E tests for Phase 3
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -169,7 +169,7 @@ phase_requirements:
 # BASELINE TRACKING (Phase 0 foundation)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 baseline:
-  established_date: "2025-12-16 18:59:24"
+  established_date: "2025-12-30 16:15:20"
   initial_metrics:
     total_files: 0
     typed_files: 0

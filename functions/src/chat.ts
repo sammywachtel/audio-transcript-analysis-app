@@ -30,7 +30,7 @@ import {
   ChatTokenUsage
 } from './utils/chatMetrics';
 import { log } from './logger';
-import type { Conversation } from '../../types';
+import type { Conversation } from './types';
 
 // Gemini API key (set via: firebase functions:secrets:set GEMINI_API_KEY)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -62,7 +62,9 @@ export const chatWithConversation = onCall<ChatRequest>(
   {
     region: 'us-central1',
     memory: '512MiB',
-    secrets: [geminiApiKey]
+    secrets: [geminiApiKey],
+    // CORS: allow all origins (callable functions are already auth-protected)
+    cors: true
   },
   async (request): Promise<ChatResponse> => {
     const startTime = Date.now();

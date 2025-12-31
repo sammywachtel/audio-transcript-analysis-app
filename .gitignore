@@ -35,6 +35,9 @@ dist-ssr
 
 # Service account keys (never commit these!)
 firebase-sa-key.json
+
+# Firebase emulator data (local test data)
+emulator-data/
 *-service-account*.json
 *-credentials*.json
 

@@ -72,7 +72,8 @@ Pages (Library, Viewer, Search)
         ▼                    ▼
     Hooks              Contexts
     ├── useAudioPlayer      ├── AuthContext
-    ├── usePersonMentions   └── ConversationContext
+    ├── useChat             └── ConversationContext
+    ├── usePersonMentions
     ├── useTranscriptSelection
     ├── useSearch           (search orchestration)
     ├── useSearchFilters    (filter state + URL sync)
@@ -82,6 +83,7 @@ Pages (Library, Viewer, Search)
                              │
                              ▼
                         Services
+                        ├── chatService     (Firebase callable wrapper)
                         ├── firestoreService
                         ├── storageService
                         └── searchService   (search + filter logic)
@@ -110,9 +112,14 @@ audio-transcript-analysis-app/
 │   │   ├── DateRangeFilter.tsx      # Date range preset/custom selector
 │   │   ├── SpeakerFilter.tsx        # Speaker checkbox filter with counts
 │   │   └── TopicFilter.tsx          # Topic checkbox filter with counts
+│   ├── shared/             # Shared components
+│   │   └── CostIndicator.tsx        # Per-message cost display
 │   └── viewer/             # Transcript viewer components
 │       ├── AudioPlayer.tsx
-│       ├── Sidebar.tsx
+│       ├── ChatInput.tsx            # Chat message input
+│       ├── ChatMessage.tsx          # User/assistant message display
+│       ├── ChatSidebar.tsx          # Chat panel with messages
+│       ├── Sidebar.tsx              # Three-tab sidebar (Context/People/Chat)
 │       ├── TranscriptSegment.tsx
 │       ├── TranscriptView.tsx
 │       ├── TopicMarker.tsx
@@ -123,6 +130,7 @@ audio-transcript-analysis-app/
 ├── hooks/                  # Custom React hooks
 │   ├── useAudioPlayer.ts
 │   ├── useAutoScroll.ts
+│   ├── useChat.ts          # Chat message state management
 │   ├── useDebounce.ts      # Generic debounce for inputs
 │   ├── useMetrics.ts       # Observability data hooks
 │   ├── usePersonMentions.ts
@@ -136,6 +144,7 @@ audio-transcript-analysis-app/
 │   ├── AdminDashboard.tsx  # Admin dashboard with metrics, users, pricing
 │   └── UserStats.tsx       # Personal usage statistics
 ├── services/               # Firebase + app services
+│   ├── chatService.ts      # Chat Firebase callable wrapper
 │   ├── firestoreService.ts
 │   ├── storageService.ts
 │   ├── metricsService.ts   # Observability queries
@@ -312,7 +321,7 @@ Cloud Function (transcribeAudio)
 - Browser back/forward restores full filter state
 - SessionStorage persists filters when navigating away and returning
 
-### Chat Flow
+### Chat Flow (Backend)
 
 ```
 1. User asks question about transcript
@@ -364,6 +373,116 @@ Cloud Function (transcribeAudio)
 - LLM instructed to explicitly state when information not in transcript
 - `isUnanswerable` flag set based on response patterns
 - Empty or low-confidence sources returned for unanswerable questions
+
+### Chat UI Flow (Frontend)
+
+The chat interface is integrated into the Viewer sidebar as a third tab alongside Context and People.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Viewer Page                              │
+│                                                             │
+│  ┌───────────────────┐              ┌──────────────────┐   │
+│  │  Transcript       │              │  Sidebar         │   │
+│  │  View             │              │                  │   │
+│  │                   │              │  [Context|People │   │
+│  │  Audio Player     │              │   |Chat ③]       │   │
+│  │  (synchronized)   │              │                  │   │
+│  └───────────────────┘              │  ┌────────────┐  │   │
+│                                     │  │ Chat Panel │  │   │
+│                                     │  └────────────┘  │   │
+│                                     └──────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Component Hierarchy:**
+```
+Viewer.tsx
+├── useChat({ conversationId })
+│   ├── messages: ChatMessage[]
+│   ├── draftInput: string
+│   ├── sendMessage(msg: string)
+│   └── isLoading, error states
+│
+├── Sidebar.tsx
+│   ├── activeTab: 'context' | 'people' | 'chat'
+│   ├── chatMessageCount badge on tab
+│   │
+│   └── ChatSidebar.tsx (when activeTab === 'chat')
+│       ├── Header: title + duration
+│       ├── Empty state with example questions
+│       ├── Message list (scrollable)
+│       │   └── ChatMessage.tsx × N
+│       │       ├── User/Assistant avatar
+│       │       ├── Message content
+│       │       ├── CostIndicator (assistant only)
+│       │       └── Timestamp sources (clickable links)
+│       │
+│       └── ChatInput.tsx (fixed at bottom)
+│           ├── Auto-resizing textarea
+│           ├── Enter to submit, Shift+Enter for newline
+│           └── Send button
+```
+
+**State Management:**
+1. **useChat Hook** (`hooks/useChat.ts`):
+   - Maintains message history per conversation
+   - Manages draft input (persists across tab switches)
+   - Handles optimistic updates (add user message immediately)
+   - Calls chatService.sendChatMessage()
+   - Resets on conversationId change
+
+2. **Chat Service** (`services/chatService.ts`):
+   - Wrapper around Firebase callable: `httpsCallable(functions, 'chatWithConversation')`
+   - Client-side validation (message length, empty check)
+   - Error transformation from Firebase error codes
+
+**User Flow:**
+```
+1. User clicks Chat tab in Sidebar
+        ↓
+2. Empty state shows example questions
+        ↓
+3. User types question in ChatInput
+        ↓
+4. Press Enter → sendMessage() called
+        ↓
+5. User message added optimistically to UI
+        ↓
+6. Loading spinner appears
+        ↓
+7. Backend processes request (see Chat Flow above)
+        ↓
+8. Assistant response added to message list
+        ↓
+9. Timestamp sources rendered as clickable links
+        ↓
+10. Click timestamp → scroll to segment + seek audio
+```
+
+**Timestamp Citations:**
+- Format: `[▶ 12:34 - Speaker Name]`
+- Clicking navigates to segment and seeks audio
+- Uses existing `handleNavigateToSegment()` + `seek()` from Viewer
+- Blue pill styling matching design system
+
+**Empty State:**
+- Shows when `messages.length === 0`
+- Provides 4 example questions:
+  - "What are the main topics discussed?"
+  - "Who are the key people mentioned?"
+  - "What decisions were made?"
+  - "Can you summarize the conversation?"
+
+**Error Handling:**
+- Rate limit exceeded → dismissible error banner
+- Network errors → dismissible error banner
+- Failed messages removed from optimistic UI
+
+**State Persistence:**
+- Draft input persists when switching tabs
+- Message history resets when changing conversations
+- Tab state (activeTab) local to Sidebar component
 
 ### Two-Way Selection Sync
 
