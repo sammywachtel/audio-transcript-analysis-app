@@ -24,6 +24,7 @@ import {
   LLMUsage
 } from './metrics';
 import { recordUserEvent } from './userEvents';
+import { jsonrepair } from 'jsonrepair';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -192,6 +193,102 @@ interface WhisperXHints {
 }
 
 /**
+ * Robustly parse JSON from LLM output.
+ *
+ * Gemini sometimes produces malformed JSON despite schema enforcement - typically
+ * unescaped quotes or special characters in string values. This tries:
+ * 1. Direct JSON.parse (fast path for valid JSON)
+ * 2. jsonrepair library (handles most malformed JSON)
+ * 3. Basic cleanup heuristics (markdown fences, trailing garbage)
+ *
+ * Logs what worked so we can track how often Gemini produces broken JSON.
+ */
+function robustJsonParse<T>(text: string, context: string): T {
+  // Strip markdown code fences if present
+  const cleanText = text.replace(/```json\s*|\s*```/g, '').trim();
+
+  // Fast path: try direct parse first
+  try {
+    const result = JSON.parse(cleanText) as T;
+    console.log(`[${context}] JSON parsed directly (valid output)`);
+    return result;
+  } catch (directError) {
+    console.log(`[${context}] Direct JSON parse failed, attempting repair...`);
+  }
+
+  // Second attempt: use jsonrepair library
+  try {
+    const repaired = jsonrepair(cleanText);
+    const result = JSON.parse(repaired) as T;
+    console.log(`[${context}] JSON repaired successfully by jsonrepair library`);
+    return result;
+  } catch (repairError) {
+    console.log(`[${context}] jsonrepair failed, trying truncation fallback...`);
+  }
+
+  // Last resort: try to find valid JSON by truncating at last complete object/array
+  // This helps when output was cut off mid-generation
+  try {
+    // Find last closing brace/bracket that could complete the JSON
+    let lastValidEnd = -1;
+    let braceDepth = 0;
+    let bracketDepth = 0;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = 0; i < cleanText.length; i++) {
+      const char = cleanText[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '{') braceDepth++;
+        else if (char === '}') {
+          braceDepth--;
+          if (braceDepth === 0 && bracketDepth === 0) {
+            lastValidEnd = i;
+          }
+        } else if (char === '[') bracketDepth++;
+        else if (char === ']') {
+          bracketDepth--;
+          if (braceDepth === 0 && bracketDepth === 0) {
+            lastValidEnd = i;
+          }
+        }
+      }
+    }
+
+    if (lastValidEnd > 0) {
+      const truncated = cleanText.slice(0, lastValidEnd + 1);
+      const result = JSON.parse(truncated) as T;
+      console.log(`[${context}] JSON recovered by truncating to position ${lastValidEnd}`);
+      return result;
+    }
+  } catch (truncateError) {
+    // Truncation didn't help
+  }
+
+  // All strategies failed - throw with useful context
+  throw new Error(
+    `[${context}] Failed to parse JSON after all repair attempts. ` +
+    `Text length: ${cleanText.length}, starts with: ${cleanText.slice(0, 100)}...`
+  );
+}
+
+/**
  * Result from Gemini pre-analysis of audio.
  * Provides speaker hints for WhisperX AND full content analysis in one pass.
  */
@@ -346,9 +443,8 @@ Important:
     outputTokens: tokenUsage.outputTokens
   });
 
-  // Parse response
-  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
-  const parsed = JSON.parse(cleanJson) as {
+  // Parse response with robust error handling
+  type PreAnalysisResponse = {
     speakerCount: number;
     speakers: Array<{ id: string; name?: string; role?: string }>;
     title: string;
@@ -356,6 +452,7 @@ Important:
     terms: Array<{ term: string; definition: string; aliases?: string[] }>;
     people: Array<{ name: string; affiliation?: string }>;
   };
+  const parsed = robustJsonParse<PreAnalysisResponse>(responseText, 'Gemini Pre-Analysis');
 
   // Build WhisperX hints
   const speakerNames = parsed.speakers
@@ -492,9 +589,8 @@ Return as JSON with a "segments" array.
 
     console.log(`[Gemini Fallback] Response received in ${(durationMs / 1000).toFixed(1)}s`);
 
-    // Parse the response
-    const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
-    const parsed = JSON.parse(cleanJson) as {
+    // Parse response with robust error handling
+    type FallbackResponse = {
       segments: Array<{
         text: string;
         startSeconds: number;
@@ -502,6 +598,7 @@ Return as JSON with a "segments" array.
         speaker?: string;
       }>;
     };
+    const parsed = robustJsonParse<FallbackResponse>(responseText, 'Gemini Fallback');
 
     // Convert to WhisperXSegment format
     const segments: WhisperXSegment[] = parsed.segments.map(seg => ({
@@ -1802,22 +1899,12 @@ Return your analysis as JSON matching the provided schema.
     outputTokens: tokenUsage.outputTokens
   });
 
-  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
-
-  try {
-    const parsed = JSON.parse(cleanJson) as GeminiAnalysis;
-    console.debug('[Gemini Analysis] JSON parsed successfully');
-    return {
-      analysis: parsed,
-      tokenUsage
-    };
-  } catch (parseError) {
-    console.error('[Gemini Analysis] JSON parse failed:', {
-      error: parseError instanceof Error ? parseError.message : String(parseError),
-      cleanJsonPreview: cleanJson.substring(0, 500)
-    });
-    throw parseError;
-  }
+  // Parse response with robust error handling
+  const parsed = robustJsonParse<GeminiAnalysis>(responseText, 'Gemini Analysis');
+  return {
+    analysis: parsed,
+    tokenUsage
+  };
 }
 
 /**
@@ -1944,10 +2031,10 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
     outputTokens: tokenUsage.outputTokens
   });
 
-  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
-
+  // Parse response with robust error handling (fallback to empty notes on failure)
   try {
-    const parsed = JSON.parse(cleanJson) as { speakerNotes: GeminiAnalysis['speakerNotes'] };
+    type SpeakerIdResponse = { speakerNotes: GeminiAnalysis['speakerNotes'] };
+    const parsed = robustJsonParse<SpeakerIdResponse>(responseText, 'Speaker Identification');
 
     console.log('[Speaker Identification] Analysis complete:', {
       speakerNotesCount: parsed.speakerNotes?.length ?? 0,
@@ -1961,9 +2048,8 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
       tokenUsage
     };
   } catch (parseError) {
-    console.error('[Speaker Identification] JSON parse failed:', {
-      error: parseError instanceof Error ? parseError.message : String(parseError),
-      cleanJsonPreview: cleanJson.substring(0, 500)
+    console.error('[Speaker Identification] JSON parse failed even after repair:', {
+      error: parseError instanceof Error ? parseError.message : String(parseError)
     });
     // Return empty speaker notes on parse failure - will fall back to pre-analysis
     return {
@@ -2098,10 +2184,10 @@ If no corrections are needed, return an empty array.
     outputTokens: tokenUsage.outputTokens
   });
 
-  const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
-
+  // Parse response with robust error handling (fallback to no corrections on failure)
   try {
-    const parsed = JSON.parse(cleanJson) as { corrections: Array<{ segmentIndex: number; newSpeaker: string; reason: string }> };
+    type ReassignResponse = { corrections: Array<{ segmentIndex: number; newSpeaker: string; reason: string }> };
+    const parsed = robustJsonParse<ReassignResponse>(responseText, 'Speaker Reassignment');
 
     // Convert to SpeakerCorrection format with action='reassign'
     const corrections: SpeakerCorrection[] = parsed.corrections.map(c => ({
@@ -2121,9 +2207,8 @@ If no corrections are needed, return an empty array.
       tokenUsage
     };
   } catch (parseError) {
-    console.error('[Speaker Reassignment] JSON parse failed:', {
-      error: parseError instanceof Error ? parseError.message : String(parseError),
-      cleanJsonPreview: cleanJson.substring(0, 500)
+    console.error('[Speaker Reassignment] JSON parse failed even after repair:', {
+      error: parseError instanceof Error ? parseError.message : String(parseError)
     });
     // Don't fail the whole transcription if speaker correction fails
     // Still return token usage even on parse failure (Gemini was still called)

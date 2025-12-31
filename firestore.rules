@@ -60,6 +60,22 @@ service cloud.firestore {
       // Users can delete their own conversations
       allow delete: if isAuthenticated()
         && resource.data.userId == request.auth.uid;
+
+      // Chat history subcollection - messages for conversation chat
+      match /chatHistory/{messageId} {
+        // Users can only read chat history for their own conversations
+        allow read: if isAuthenticated()
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+
+        // Users can create chat messages for their own conversations
+        allow create: if isAuthenticated()
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+
+        // Users can delete chat messages from their own conversations
+        // Note: update not allowed - messages are immutable once created
+        allow delete: if isAuthenticated()
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+      }
     }
 
     // =======================================================================

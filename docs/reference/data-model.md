@@ -43,6 +43,39 @@ interface ConversationDoc {
 }
 ```
 
+#### conversations/{conversationId}/chatHistory (subcollection)
+
+Chat message history for conversation chat feature. Provides persistent, synchronized chat across devices.
+
+**Path**: `conversations/{conversationId}/chatHistory/{messageId}`
+
+```typescript
+interface ChatHistoryDoc {
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: Array<{              // Timestamp citations (assistant messages only)
+    segmentId: string;
+    startMs: number;
+    endMs: number;
+    speaker: string;
+    text: string;
+  }>;
+  costUsd?: number;              // AI processing cost (assistant messages only)
+  isUnanswerable?: boolean;      // True if LLM couldn't answer (assistant messages only)
+  createdAt: Timestamp;          // Server timestamp
+}
+```
+
+**Features**:
+- Real-time synchronization across devices
+- Pagination support (load older messages in batches of 10)
+- 50 message limit per conversation (enforced client-side)
+- Immutable messages (no updates after creation)
+- Export to JSON for data portability
+- Deleted when parent conversation is deleted
+
+**Security**: Users can only access chat history for conversations they own. Messages are immutable (no updates allowed).
+
 ### users
 
 User profile, preferences, and admin status.
@@ -610,6 +643,21 @@ service cloud.firestore {
       // Delete: must be owner
       allow delete: if request.auth != null
         && resource.data.userId == request.auth.uid;
+
+      // Chat history subcollection
+      match /chatHistory/{messageId} {
+        // Read: must own parent conversation
+        allow read: if request.auth != null
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+
+        // Create: must own parent conversation
+        allow create: if request.auth != null
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+
+        // Delete: must own parent conversation (for clear history)
+        allow delete: if request.auth != null
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+      }
     }
 
     // Metrics collection - admin read only, Cloud Functions write only

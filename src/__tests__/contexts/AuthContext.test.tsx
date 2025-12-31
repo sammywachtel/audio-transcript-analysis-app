@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { AuthProvider, useAuth } from '../../../contexts/AuthContext';
+import { AuthProvider, useAuth } from '@/contexts/AuthContext';
 import {
   mockFirebaseAuth,
   createMockUser,
