@@ -2,23 +2,27 @@
  * ChatMessage Component
  *
  * Renders user and assistant chat messages with:
- * - Timestamp citations as clickable links
+ * - Timestamp citations as interactive TimestampLinks
  * - Per-message cost indicator
  * - Special styling for unanswerable responses
+ * - Error recovery for missing segments/audio
  */
 
 import React from 'react';
-import { User, Bot, Info, Play } from 'lucide-react';
+import { User, Bot, Info } from 'lucide-react';
 import { cn } from '@/utils';
-import { formatTime } from '@/utils';
 import { CostIndicator } from '../shared/CostIndicator';
 import { ChatHistoryMessage } from '@/services/chatHistoryService';
 import { Speaker } from '@/config/types';
+import { TimestampLink } from './TimestampLink';
 
 interface ChatMessageProps {
   message: ChatHistoryMessage;
   speakers: Record<string, Speaker>;
-  onTimestampClick?: (segmentId: string, startMs: number) => void;
+  conversationId: string;
+  onSeek?: (timeMs: number) => void;
+  onPlay?: () => void;
+  onHighlight?: (segmentId: string | null) => void;
 }
 
 /**
@@ -27,7 +31,10 @@ interface ChatMessageProps {
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   speakers,
-  onTimestampClick
+  conversationId,
+  onSeek,
+  onPlay,
+  onHighlight
 }) => {
   const isUser = message.role === 'user';
   const isUnanswerable = message.isUnanswerable;
@@ -87,33 +94,20 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               {message.sources.map((source, idx) => {
                 const speaker = source.speaker ? speakers[source.speaker] : null;
                 const speakerName = speaker?.displayName || source.speaker || 'Unknown';
-                const timestamp = source.startMs !== undefined ? formatTime(source.startMs) : '0:00';
 
                 return (
-                  <button
+                  <TimestampLink
                     key={`${source.segmentId}-${idx}`}
-                    onClick={() => {
-                      if (onTimestampClick && source.segmentId && source.startMs !== undefined) {
-                        onTimestampClick(source.segmentId, source.startMs);
-                      }
-                    }}
-                    className={cn(
-                      'inline-flex items-center gap-1 px-2 py-1 rounded text-xs',
-                      'bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100',
-                      'transition-colors cursor-pointer',
-                      'font-medium'
-                    )}
-                    title={`Jump to ${timestamp} - ${speakerName}`}
-                  >
-                    <Play size={10} className="fill-current" />
-                    <span>{timestamp}</span>
-                    {speakerName && (
-                      <>
-                        <span className="text-blue-400">-</span>
-                        <span className="text-blue-600">{speakerName}</span>
-                      </>
-                    )}
-                  </button>
+                    segmentId={source.segmentId}
+                    startMs={source.startMs}
+                    speakerName={speakerName}
+                    conversationId={conversationId}
+                    analyticsSource="chat"
+                    onSeek={onSeek}
+                    onPlay={onPlay}
+                    onHighlight={onHighlight}
+                    autoPlay={true}
+                  />
                 );
               })}
             </div>

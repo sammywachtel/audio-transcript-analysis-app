@@ -6,11 +6,15 @@
  * - Draft input text
  * - Loading and error states
  * - Optimistic updates for responsive UX
+ * - Cost accumulation and warnings
+ * - Rotating question suggestions
+ * - Analytics tracking
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { sendChatMessage } from '../services/chatService';
-import { chatHistoryService, TimestampSource } from '../services/chatHistoryService';
+import { chatHistoryService, TimestampSource, ChatHistoryMessage } from '../services/chatHistoryService';
+import { analyticsService } from '../services/analyticsService';
 
 /**
  * Chat message for display
@@ -29,6 +33,7 @@ export interface ChatMessage {
 interface UseChatOptions {
   conversationId: string;
   messageCount: number; // From useChatHistory, used for limit checking
+  messages?: ChatHistoryMessage[]; // Chat messages for cost calculation
 }
 
 interface UseChatReturn {
@@ -39,7 +44,25 @@ interface UseChatReturn {
   sendMessage: (message: string) => Promise<void>;
   clearError: () => void;
   isAtLimit: boolean; // True when at 50 message limit
+  cumulativeCostUsd: number; // Total cost across all messages
+  suggestions: string[]; // Current question suggestions
+  costWarningLevel: 'none' | 'primary' | 'escalated'; // Progressive cost warning
 }
+
+/**
+ * Base question suggestions pool
+ * Rotates after each query to keep suggestions fresh
+ */
+const BASE_SUGGESTIONS = [
+  'What are the main topics discussed?',
+  'Who are the key people mentioned?',
+  'What decisions were made?',
+  'Can you summarize the conversation?',
+  'What action items were mentioned?',
+  'What are the key takeaways?',
+  'What questions were raised?',
+  'What was the main outcome?'
+];
 
 /**
  * Chat state management hook
@@ -47,13 +70,42 @@ interface UseChatReturn {
  * Handles message sending and persistence.
  * Works with useChatHistory for message loading/display.
  */
-export function useChat({ conversationId, messageCount }: UseChatOptions): UseChatReturn {
+export function useChat({ conversationId, messageCount, messages = [] }: UseChatOptions): UseChatReturn {
   const [draftInput, setDraftInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [suggestionOffset, setSuggestionOffset] = useState(0);
 
   // Check if we're at the 50 message limit
   const isAtLimit = messageCount >= 50;
+
+  // Calculate cumulative cost from messages
+  const cumulativeCostUsd = messages.reduce((total, msg) => {
+    return total + (msg.costUsd || 0);
+  }, 0);
+
+  // Determine cost warning level
+  const costWarningLevel: 'none' | 'primary' | 'escalated' =
+    cumulativeCostUsd >= 1.25 ? 'escalated' :
+    cumulativeCostUsd >= 0.50 ? 'primary' :
+    'none';
+
+  // Track cost warnings (fire once when threshold is crossed)
+  useEffect(() => {
+    if (costWarningLevel !== 'none') {
+      analyticsService.trackCostWarning({
+        conversationId,
+        cumulativeCostUsd,
+        warningLevel: costWarningLevel,
+        messageCount
+      });
+    }
+  }, [costWarningLevel, conversationId, cumulativeCostUsd, messageCount]);
+
+  // Generate rotating suggestions (3 at a time)
+  const suggestions = BASE_SUGGESTIONS
+    .slice(suggestionOffset, suggestionOffset + 3)
+    .concat(BASE_SUGGESTIONS.slice(0, Math.max(0, (suggestionOffset + 3) - BASE_SUGGESTIONS.length)));
 
   /**
    * Send a chat message and persist to Firestore
@@ -68,6 +120,13 @@ export function useChat({ conversationId, messageCount }: UseChatOptions): UseCh
     setError(null);
 
     try {
+      // Track question analytics
+      analyticsService.trackChatQuestion({
+        conversationId,
+        messageLength: message.length,
+        messageCount
+      });
+
       // Add user message to Firestore
       // Real-time listener in useChatHistory will show it immediately
       await chatHistoryService.addMessage(conversationId, {
@@ -91,13 +150,25 @@ export function useChat({ conversationId, messageCount }: UseChatOptions): UseCh
         }));
 
       // Add assistant response to Firestore
-      await chatHistoryService.addMessage(conversationId, {
+      const assistantMessageId = await chatHistoryService.addMessage(conversationId, {
         role: 'assistant',
         content: response.answer,
         sources: sources.length > 0 ? sources : undefined,
         costUsd: response.costUsd,
         isUnanswerable: response.isUnanswerable
       });
+
+      // Track response analytics
+      analyticsService.trackChatResponse({
+        conversationId,
+        messageId: assistantMessageId,
+        costUsd: response.costUsd || 0,
+        isUnanswerable: response.isUnanswerable || false,
+        sourceCount: sources.length
+      });
+
+      // Rotate suggestions after each query
+      setSuggestionOffset((offset) => (offset + 3) % BASE_SUGGESTIONS.length);
 
       setDraftInput(''); // Clear input on success
 
@@ -107,7 +178,7 @@ export function useChat({ conversationId, messageCount }: UseChatOptions): UseCh
     } finally {
       setIsLoading(false);
     }
-  }, [conversationId, isLoading, isAtLimit]);
+  }, [conversationId, isLoading, isAtLimit, messageCount]);
 
   /**
    * Clear error state
@@ -123,6 +194,9 @@ export function useChat({ conversationId, messageCount }: UseChatOptions): UseCh
     error,
     sendMessage,
     clearError,
-    isAtLimit
+    isAtLimit,
+    cumulativeCostUsd,
+    suggestions,
+    costWarningLevel
   };
 }

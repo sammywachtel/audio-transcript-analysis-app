@@ -140,10 +140,36 @@ export const MOCK_CONVERSATION: Conversation = {
   ]
 };
 
+// Legacy speaker colors (used for badges)
 export const SPEAKER_COLORS = [
   'text-blue-600 bg-blue-50 border-blue-200',
   'text-emerald-600 bg-emerald-50 border-emerald-200',
   'text-violet-600 bg-violet-50 border-violet-200',
   'text-orange-600 bg-orange-50 border-orange-200',
   'text-pink-600 bg-pink-50 border-pink-200',
+];
+
+// Compact speaker label design colors
+export const SPEAKER_BORDER_COLORS = [
+  'border-l-blue-400',
+  'border-l-emerald-400',
+  'border-l-violet-400',
+  'border-l-orange-400',
+  'border-l-pink-400',
+];
+
+export const SPEAKER_BADGE_COLORS = [
+  'bg-blue-50 border-blue-200 text-blue-800',
+  'bg-emerald-50 border-emerald-200 text-emerald-800',
+  'bg-violet-50 border-violet-200 text-violet-800',
+  'bg-orange-50 border-orange-200 text-orange-800',
+  'bg-pink-50 border-pink-200 text-pink-800',
+];
+
+export const SPEAKER_DOT_COLORS = [
+  'bg-blue-400',
+  'bg-emerald-400',
+  'bg-violet-400',
+  'bg-orange-400',
+  'bg-pink-400',
 ];

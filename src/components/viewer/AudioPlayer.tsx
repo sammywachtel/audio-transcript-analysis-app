@@ -87,7 +87,13 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   const displayValue = isDragging ? sliderValue : currentTimeMs;
 
   return (
-    <div className="h-16 bg-white border-t border-slate-200 flex items-center px-4 md:px-8 gap-4 md:gap-8 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-20">
+    <div
+      className="h-16 bg-white border-t border-slate-200 flex items-center px-4 md:px-8 gap-4 md:gap-8 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-20"
+      style={{
+        /* Add bottom padding for devices with home indicators (iOS safe area) */
+        paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))'
+      }}
+    >
 
       {/* Controls */}
       <div className="flex items-center gap-3">

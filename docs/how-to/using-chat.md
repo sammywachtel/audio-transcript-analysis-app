@@ -8,41 +8,78 @@ The chat feature allows you to ask natural language questions about your transcr
 
 **Key Features:**
 - Persistent chat history (survives page reloads and works across devices)
-- Timestamp citations that link to transcript segments
+- Interactive timestamp citations with auto-play
+- Rotating contextual question suggestions
+- Progressive cost transparency warnings
 - 50 message limit per conversation
 - Export chat history as JSON
-- Clear history when needed
+- Mobile-optimized with 44px touch targets and haptic feedback
 
 ## Starting a Chat
 
 1. Open any completed conversation in the Viewer
 2. Click the **Chat** tab in the right sidebar
-3. Type your question in the input field at the bottom
-4. Press Enter or click Send
+3. You'll see suggested questions to get started
+4. Click a suggestion or type your own question
+5. Press Enter or click Send
 
-### Example Questions
+### Question Suggestions
 
+The chat provides contextual question suggestions that rotate after each query:
+
+- **Empty state:** See 3 suggested questions when you first open the chat
+- **After unanswerable responses:** Get fresh suggestions when the AI can't answer
+- **Rotating prompts:** Suggestions change after each query to keep things fresh
+- **One-tap input:** Click any suggestion to auto-fill and send
+
+**Example Questions:**
 - "What are the main topics discussed?"
 - "Who are the key people mentioned?"
 - "What decisions were made?"
 - "Can you summarize the conversation?"
-- "What did Speaker 1 say about the budget?"
+- "What action items were mentioned?"
 
 ## Understanding Chat Responses
 
 ### Timestamp Citations
 
-When the AI references specific parts of the transcript, it includes clickable timestamp citations. Click any timestamp to:
-- Jump to that segment in the transcript
-- Seek the audio to that exact moment
+When the AI references specific parts of the transcript, it includes interactive timestamp citations with powerful auto-play features:
+
+**What happens when you click a timestamp:**
+1. **Auto-play:** Audio automatically starts playing from that moment
+2. **Scroll:** Transcript scrolls to the referenced segment
+3. **Highlight:** Segment glows with a yellow highlight for 2 seconds
+4. **Seek:** Audio player seeks to the exact timestamp
+
+**Error Recovery:**
+- If a segment is missing or audio hasn't loaded yet, you'll see a helpful error tooltip
+- The tooltip auto-dismisses after 3 seconds
+- Each timestamp is treated independently
+
+**Mobile-Friendly:**
+- 44px minimum touch target on all devices
+- Haptic feedback on supported devices (short vibration on tap)
+- Smooth scroll animations
 
 ### Unanswerable Questions
 
-If the AI determines it cannot answer based on the transcript content, you'll see a message indicating the question is unanswerable. Try rephrasing or asking a more specific question.
+If the AI determines it cannot answer based on the transcript content:
+- You'll see a message indicating the question is unanswerable
+- Fresh question suggestions appear below the response
+- Try clicking a suggestion or rephrasing your question
 
-### Cost Display
+### Cost Display & Warnings
 
-Each message shows the AI processing cost in USD. This helps you track your usage.
+The chat tracks costs transparently to help you manage usage:
+
+**Per-Message Cost:**
+Each assistant response shows its AI processing cost in small gray text (e.g., "$0.002").
+
+**Progressive Cost Warnings:**
+- **$0.50 threshold:** Yellow "Cost notice" banner appears
+- **$1.25 threshold:** Orange "High cost alert" banner appears
+- Cumulative cost shown across all messages in the conversation
+- Warnings help you make informed decisions about continued usage
 
 ## Chat History Persistence
 
@@ -122,13 +159,19 @@ The JSON format is structured for easy reading and processing:
 
 ## Tips for Better Results
 
-1. **Be specific:** Instead of "Tell me about this," ask "What did Speaker 2 say about the new product launch?"
+1. **Start with suggestions:** Click the suggested questions to learn what the chat can do
 
-2. **Reference context:** The AI knows about speakers, terms, topics, and people mentioned in the transcript
+2. **Be specific:** Instead of "Tell me about this," ask "What did Speaker 2 say about the new product launch?"
 
-3. **Ask follow-ups:** The AI maintains context within the conversation
+3. **Reference context:** The AI knows about speakers, terms, topics, and people mentioned in the transcript
 
-4. **Use the limit wisely:** If approaching the limit, consider starting a fresh conversation or exporting important discussions
+4. **Ask follow-ups:** The AI maintains context within the conversation
+
+5. **Use the limit wisely:** If approaching the limit, consider starting a fresh conversation or exporting important discussions
+
+6. **Watch your costs:** Keep an eye on cumulative costs, especially for long conversations
+
+7. **Leverage timestamps:** Click timestamp citations to hear the exact audio source
 
 ## Troubleshooting
 
@@ -161,6 +204,40 @@ If you see an error:
 - Messages are stored in your Firestore database
 - Deleting a conversation also deletes all associated chat history
 - No one else can see your chat conversations
+- Analytics events track usage patterns but not message content
+
+## Mobile Experience
+
+The chat is optimized for mobile devices:
+
+**Touch Targets:**
+- All interactive elements are at least 44px tall (Apple/Google guidelines)
+- Suggestion buttons, timestamp links, and action buttons are tap-friendly
+
+**Haptic Feedback:**
+- Suggestion taps trigger a short vibration on supported devices
+- Provides tactile confirmation of interactions
+
+**Scrolling:**
+- Auto-scrolls to new messages
+- Smooth scroll animations to timestamp segments
+- Optimized for one-handed use
+
+## Analytics Tracking
+
+The chat feature tracks anonymous usage analytics to improve the experience:
+
+**Events tracked:**
+- Question submissions (length, message count)
+- Assistant responses (cost, sources, unanswerable status)
+- Timestamp clicks (segment ID, source context)
+- Cost warning displays
+- Empty state interactions
+
+**Privacy:**
+- Message content is never tracked
+- All events are anonymous and aggregated
+- Used only to improve the product experience
 
 ## Related Documentation
 

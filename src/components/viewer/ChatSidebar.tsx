@@ -6,16 +6,19 @@
  * - Header with conversation title and duration
  * - Chat history controls (clear, export, limit warnings)
  * - Pagination ("Load older" button)
- * - Empty state with example questions
+ * - Empty state with rotating question suggestions
+ * - Progressive cost transparency warnings
  * - Scrollable message list
  * - Fixed input at bottom (disabled when at 50 message limit)
+ * - Mobile-friendly with 44px touch targets
  */
 
 import React, { useRef, useEffect } from 'react';
-import { MessageSquare, AlertCircle, Loader2, ChevronUp } from 'lucide-react';
+import { MessageSquare, AlertCircle, Loader2, ChevronUp, DollarSign, Info } from 'lucide-react';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatHistory } from './ChatHistory';
+import { QuestionSuggestions } from './QuestionSuggestions';
 import { ChatHistoryMessage } from '@/services/chatHistoryService';
 import { Speaker } from '@/config/types';
 import { formatTime } from '@/utils';
@@ -34,11 +37,17 @@ interface ChatSidebarProps {
   error: string | null;
   onClearError: () => void;
   speakers: Record<string, Speaker>;
-  onTimestampClick?: (segmentId: string, startMs: number) => void;
+  onSeek?: (timeMs: number) => void;
+  onPlay?: () => void;
+  onHighlight?: (segmentId: string | null) => void;
   onClearHistoryComplete: () => void; // Callback after clearing history
   hasOlderMessages: boolean;
   onLoadOlder: () => Promise<void>;
   isLoadingOlder: boolean;
+  // New props for enhanced features
+  suggestions?: string[];
+  cumulativeCostUsd?: number;
+  costWarningLevel?: 'none' | 'primary' | 'escalated';
 }
 
 /**
@@ -58,14 +67,23 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
   error,
   onClearError,
   speakers,
-  onTimestampClick,
+  onSeek,
+  onPlay,
+  onHighlight,
   onClearHistoryComplete,
   hasOlderMessages,
   onLoadOlder,
-  isLoadingOlder
+  isLoadingOlder,
+  suggestions = [],
+  cumulativeCostUsd = 0,
+  costWarningLevel = 'none'
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  // Track last message for showing suggestions after unanswerable responses
+  const lastMessage = messages[messages.length - 1];
+  const showSuggestionsAfterResponse = lastMessage?.role === 'assistant' && lastMessage?.isUnanswerable;
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -136,13 +154,49 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
         </div>
       )}
 
+      {/* Progressive Cost Warning Banner */}
+      {costWarningLevel === 'primary' && (
+        <div className="mx-4 mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2">
+          <DollarSign size={16} className="text-yellow-600 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-yellow-800 font-medium">
+              Cost notice: ${cumulativeCostUsd.toFixed(2)} spent
+            </p>
+            <p className="text-sm text-yellow-700 mt-1">
+              You've used ${cumulativeCostUsd.toFixed(2)} in chat costs for this conversation.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {costWarningLevel === 'escalated' && (
+        <div className="mx-4 mt-3 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-2">
+          <DollarSign size={16} className="text-orange-600 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-orange-800 font-medium">
+              High cost alert: ${cumulativeCostUsd.toFixed(2)} spent
+            </p>
+            <p className="text-sm text-orange-700 mt-1">
+              This conversation has exceeded $1.25 in chat costs. Consider starting a new conversation or being more selective with questions.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Messages Area */}
       <div
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto p-4 space-y-3"
       >
         {messages.length === 0 ? (
-          <EmptyState />
+          <EmptyState
+            conversationId={conversationId}
+            suggestions={suggestions}
+            onSuggestionClick={(suggestion) => {
+              setDraftInput(suggestion);
+              onSendMessage(suggestion);
+            }}
+          />
         ) : (
           <>
             {/* Load Older Button */}
@@ -174,9 +228,33 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
                 key={message.id}
                 message={message}
                 speakers={speakers}
-                onTimestampClick={onTimestampClick}
+                conversationId={conversationId}
+                onSeek={onSeek}
+                onPlay={onPlay}
+                onHighlight={onHighlight}
               />
             ))}
+
+            {/* Show suggestions after unanswerable response */}
+            {showSuggestionsAfterResponse && suggestions.length > 0 && (
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+                <div className="flex items-start gap-2 mb-3">
+                  <Info size={14} className="text-slate-500 mt-0.5 shrink-0" />
+                  <p className="text-xs text-slate-600">
+                    That question couldn't be answered from the transcript. Try one of these instead:
+                  </p>
+                </div>
+                <QuestionSuggestions
+                  conversationId={conversationId}
+                  suggestions={suggestions}
+                  onSuggestionClick={(suggestion) => {
+                    setDraftInput(suggestion);
+                    onSendMessage(suggestion);
+                  }}
+                  showHeader={false}
+                />
+              </div>
+            )}
 
             {/* Loading indicator for new messages */}
             {isLoading && (
@@ -204,14 +282,13 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
 /**
  * Empty state shown when no messages yet
  */
-const EmptyState: React.FC = () => {
-  const exampleQuestions = [
-    'What are the main topics discussed?',
-    'Who are the key people mentioned?',
-    'What decisions were made?',
-    'Can you summarize the conversation?'
-  ];
+interface EmptyStateProps {
+  conversationId: string;
+  suggestions: string[];
+  onSuggestionClick: (suggestion: string) => void;
+}
 
+const EmptyState: React.FC<EmptyStateProps> = ({ conversationId, suggestions, onSuggestionClick }) => {
   return (
     <div className="text-center py-8 px-4">
       <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
@@ -224,22 +301,16 @@ const EmptyState: React.FC = () => {
         Ask questions about the conversation and get answers with timestamp citations.
       </p>
 
-      {/* Example Questions */}
-      <div className="mt-6">
-        <p className="text-xs uppercase font-semibold text-slate-400 tracking-wider mb-3">
-          Try asking:
-        </p>
-        <div className="space-y-2">
-          {exampleQuestions.map((question, idx) => (
-            <div
-              key={idx}
-              className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-left"
-            >
-              "{question}"
-            </div>
-          ))}
+      {/* Question Suggestions */}
+      {suggestions.length > 0 && (
+        <div className="mt-6">
+          <QuestionSuggestions
+            conversationId={conversationId}
+            suggestions={suggestions}
+            onSuggestionClick={onSuggestionClick}
+          />
         </div>
-      </div>
+      )}
     </div>
   );
 };
