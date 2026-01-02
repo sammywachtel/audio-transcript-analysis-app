@@ -97,9 +97,10 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 md:p-12">
+    <div className="min-h-screen bg-slate-50 p-4 md:p-12">
       <div className="max-w-5xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
+        {/* Header - stacks on mobile, row on desktop */}
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
           <div>
              <div className="flex items-center gap-3">
                 <h1 className="text-2xl font-bold text-slate-900">Library</h1>
@@ -107,41 +108,44 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
              </div>
              <p className="text-slate-500 mt-1">Your transcribed conversations and meetings.</p>
           </div>
-          <div className="flex items-center gap-3">
+          {/* Action buttons - scrollable on mobile, row on desktop */}
+          <div className="flex items-center gap-2 md:gap-3 overflow-x-auto pb-2 md:pb-0 -mx-4 px-4 md:mx-0 md:px-0">
             <Button
               variant="ghost"
               onClick={onSearchClick}
-              className="gap-2"
+              className="gap-2 shrink-0"
             >
               <Search size={18} />
-              Search
+              <span className="hidden sm:inline">Search</span>
             </Button>
             <Button
               variant="ghost"
               onClick={onStatsClick}
-              className="gap-2"
+              className="gap-2 shrink-0"
             >
               <BarChart3 size={18} />
-              My Stats
+              <span className="hidden sm:inline">My Stats</span>
             </Button>
             {isAdmin && (
               <Button
                 variant="ghost"
                 onClick={onAdminClick}
-                className="gap-2"
+                className="gap-2 shrink-0"
               >
                 <Settings size={18} />
-                Admin Dashboard
+                <span className="hidden md:inline">Admin Dashboard</span>
               </Button>
             )}
             <Button
               onClick={() => setIsModalOpen(true)}
-              className="gap-2 shadow-lg shadow-blue-500/20"
+              className="gap-2 shadow-lg shadow-blue-500/20 shrink-0"
             >
               <UploadCloud size={18} />
-              Upload Audio
+              <span className="hidden sm:inline">Upload Audio</span>
             </Button>
-            <UserMenu onStatsClick={onStatsClick} />
+            <div className="shrink-0">
+              <UserMenu onStatsClick={onStatsClick} />
+            </div>
           </div>
         </div>
 

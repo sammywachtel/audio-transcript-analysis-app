@@ -9,6 +9,7 @@ interface TranscriptViewProps {
   selectedTermId?: string;
   selectedPersonId?: string;
   personOccurrences: Record<string, { start: number; end: number; personId: string }[]>;
+  highlightedSegmentId?: string | null;
   onSeek: (ms: number) => void;
   onTermClick: (termId: string) => void;
   onRenameSpeaker: (speakerId: string) => void;
@@ -28,6 +29,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   selectedTermId,
   selectedPersonId,
   personOccurrences,
+  highlightedSegmentId,
   onSeek,
   onTermClick,
   onRenameSpeaker,
@@ -42,6 +44,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           // Check if a topic starts at this segment
           const topic = conversation.topics.find(t => t.startIndex === idx);
           const isActive = idx === activeSegmentIndex;
+          const isHighlighted = highlightedSegmentId === seg.segmentId;
 
           // Find term occurrences for this segment
           const segmentOccurrences = conversation.termOccurrences.filter(
@@ -49,8 +52,12 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           );
           const segmentPersonOccurrences = personOccurrences[seg.segmentId] || [];
 
+          // Check if speaker changed from previous segment
+          const previousSegment = idx > 0 ? conversation.segments[idx - 1] : null;
+          const showSpeakerChange = !previousSegment || previousSegment.speakerId !== seg.speakerId;
+
           return (
-            <div key={seg.segmentId} id={`segment-${seg.segmentId}`} className="mb-2">
+            <div key={seg.segmentId} id={`segment-${seg.segmentId}`}>
               {topic && (
                 <div className="mt-8 mb-4 px-4">
                   <TopicMarker topic={topic} />
@@ -68,8 +75,10 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 occurrences={segmentOccurrences}
                 personOccurrences={segmentPersonOccurrences}
                 isActive={isActive}
+                isHighlighted={isHighlighted}
                 activeTermId={selectedTermId}
                 activePersonId={selectedPersonId}
+                showSpeakerChange={showSpeakerChange}
                 onSeek={onSeek}
                 onTermClick={onTermClick}
                 onRenameSpeaker={onRenameSpeaker}

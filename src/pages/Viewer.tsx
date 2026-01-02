@@ -14,7 +14,7 @@ import { Sidebar } from '../components/viewer/Sidebar';
 import { AudioPlayer } from '../components/viewer/AudioPlayer';
 import { RenameSpeakerModal } from '../components/viewer/RenameSpeakerModal';
 import { KeyboardShortcutsModal } from '../components/viewer/KeyboardShortcutsModal';
-import { HelpCircle } from 'lucide-react';
+import { HelpCircle, X, PanelRight } from 'lucide-react';
 
 interface ViewerProps {
   onBack: () => void;
@@ -48,6 +48,8 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
   const [conversation, setConversation] = useState(activeConversation);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
 
   // Fetch audio URL from Firebase Storage on mount
   // The URL is generated on-demand because Storage download URLs expire
@@ -168,10 +170,14 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
     error: chatError,
     sendMessage: chatSendMessage,
     clearError: chatClearError,
-    isAtLimit: chatIsAtLimit
+    isAtLimit: chatIsAtLimit,
+    cumulativeCostUsd: chatCumulativeCostUsd,
+    suggestions: chatSuggestions,
+    costWarningLevel: chatCostWarningLevel
   } = useChat({
     conversationId: conversation.conversationId,
-    messageCount: chatMessageCount
+    messageCount: chatMessageCount,
+    messages: chatMessages
   });
 
   /**
@@ -252,17 +258,32 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
 
   /**
    * Handle timestamp click from chat messages
-   * Navigates to segment and seeks audio
+   * Navigates to segment, seeks audio, highlights segment, and auto-plays
    */
-  const handleChatTimestampClick = useCallback((segmentId: string, startMs: number) => {
-    // Scroll to segment
-    handleNavigateToSegment(segmentId);
-    // Seek audio to timestamp
-    seek(startMs);
-  }, [handleNavigateToSegment, seek]);
+  const handleChatTimestampSeek = useCallback((timeMs: number) => {
+    seek(timeMs);
+  }, [seek]);
+
+  /**
+   * Handle chat timestamp auto-play
+   * Starts playback if not already playing
+   */
+  const handleChatTimestampPlay = useCallback(() => {
+    if (!isPlaying) {
+      togglePlay();
+    }
+  }, [isPlaying, togglePlay]);
+
+  /**
+   * Handle segment highlighting from chat timestamp clicks
+   * Highlights segment for 2 seconds
+   */
+  const handleChatTimestampHighlight = useCallback((segmentId: string | null) => {
+    setHighlightedSegmentId(segmentId);
+  }, []);
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50">
+    <div className="flex flex-col h-screen-safe bg-slate-50">
       {/* Header */}
       <ViewerHeader
         title={conversation.title}
@@ -307,6 +328,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
           selectedTermId={selectedTermId}
           selectedPersonId={selectedPersonId}
           personOccurrences={personOccurrences}
+          highlightedSegmentId={highlightedSegmentId}
           onSeek={seek}
           onTermClick={handleTermClickInTranscript}
           onRenameSpeaker={handleRenameSpeaker}
@@ -324,7 +346,7 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             onPersonSelect={handlePersonClickInSidebar}
             onUpdatePerson={handleUpdatePerson}
             personMentions={mentionsMap}
-            onNavigateToSegment={handleChatTimestampClick}
+            onNavigateToSegment={handleNavigateToSegment}
             // Chat props
             conversationId={conversation.conversationId}
             chatMessages={chatMessages}
@@ -343,9 +365,114 @@ export const Viewer: React.FC<ViewerProps> = ({ onBack, onStatsClick, targetSegm
             conversationTitle={conversation.title}
             conversationDurationMs={conversation.durationMs}
             speakers={conversation.speakers}
+            chatOnSeek={handleChatTimestampSeek}
+            chatOnPlay={handleChatTimestampPlay}
+            chatOnHighlight={handleChatTimestampHighlight}
+            chatSuggestions={chatSuggestions}
+            chatCumulativeCostUsd={chatCumulativeCostUsd}
+            chatCostWarningLevel={chatCostWarningLevel}
           />
         </div>
+
+        {/* Mobile Sidebar Panel - full sidebar with Context/People/Chat tabs */}
+        {mobileChatOpen && (
+          <div className="lg:hidden fixed inset-0 z-40 flex flex-col bg-white">
+            {/* Mobile Panel Header with close button */}
+            <div
+              className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50"
+              style={{
+                /* Add top padding for devices with notches (iOS safe area) */
+                paddingTop: 'max(1rem, env(safe-area-inset-top))'
+              }}
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center">
+                  <PanelRight size={16} className="text-blue-600" />
+                </div>
+                <div>
+                  <h2 className="font-semibold text-sm text-slate-900 truncate max-w-[200px]">{conversation.title}</h2>
+                  <p className="text-xs text-slate-500">Context • People • Chat</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setMobileChatOpen(false)}
+                className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-slate-200 transition-colors"
+                aria-label="Close panel"
+              >
+                <X size={24} className="text-slate-600" />
+              </button>
+            </div>
+
+            {/* Mobile Chat Sidebar Content */}
+            <div className="flex-1 overflow-hidden">
+              <Sidebar
+                terms={Object.values(conversation.terms)}
+                people={conversation.people || []}
+                selectedTermId={selectedTermId}
+                selectedPersonId={selectedPersonId}
+                onTermSelect={handleTermClickInSidebar}
+                onPersonSelect={handlePersonClickInSidebar}
+                onUpdatePerson={handleUpdatePerson}
+                personMentions={mentionsMap}
+                onNavigateToSegment={(segmentId) => {
+                  handleNavigateToSegment(segmentId);
+                  setMobileChatOpen(false); // Close chat when navigating to segment
+                }}
+                // Chat props
+                conversationId={conversation.conversationId}
+                chatMessages={chatMessages}
+                chatMessageCount={chatMessageCount}
+                chatDraftInput={chatDraftInput}
+                chatSetDraftInput={chatSetDraftInput}
+                chatOnSendMessage={chatSendMessage}
+                chatIsLoading={chatIsLoading}
+                chatIsAtLimit={chatIsAtLimit}
+                chatError={chatError}
+                chatOnClearError={chatClearError}
+                chatOnClearHistoryComplete={chatRefreshCount}
+                chatHasOlderMessages={chatHasOlder}
+                chatOnLoadOlder={chatLoadOlder}
+                chatIsLoadingOlder={chatHistoryLoading}
+                conversationTitle={conversation.title}
+                conversationDurationMs={conversation.durationMs}
+                speakers={conversation.speakers}
+                chatOnSeek={(timeMs) => {
+                  handleChatTimestampSeek(timeMs);
+                  setMobileChatOpen(false); // Close chat when seeking
+                }}
+                chatOnPlay={handleChatTimestampPlay}
+                chatOnHighlight={handleChatTimestampHighlight}
+                chatSuggestions={chatSuggestions}
+                chatCumulativeCostUsd={chatCumulativeCostUsd}
+                chatCostWarningLevel={chatCostWarningLevel}
+                defaultTab="context"
+              />
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Mobile Sidebar FAB - opens panel with Context/People/Chat tabs */}
+      {!mobileChatOpen && (
+        <button
+          id="mobile-sidebar-fab"
+          data-testid="mobile-sidebar-fab"
+          onClick={() => setMobileChatOpen(true)}
+          aria-label="Open sidebar panel"
+          className="lg:hidden fixed z-30 w-14 h-14 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-full shadow-lg hover:shadow-xl transition-all duration-200 flex items-center justify-center touch-manipulation"
+          style={{
+            /* Explicit positioning to prevent layout shift issues on mobile
+             * AudioPlayer is 64px (h-16), add 16px gap = 80px from bottom
+             * Using inline styles + important classes ensures positioning sticks after refresh
+             */
+            position: 'fixed',
+            bottom: 'calc(4rem + 1rem)', /* 64px (AudioPlayer) + 16px (gap) */
+            right: '1rem',
+          }}
+        >
+          <PanelRight size={24} />
+        </button>
+      )}
 
       {/* Footer Player */}
       <AudioPlayer

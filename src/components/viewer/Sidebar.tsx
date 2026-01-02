@@ -33,6 +33,15 @@ interface SidebarProps {
   conversationTitle?: string;
   conversationDurationMs?: number;
   speakers?: Record<string, Speaker>;
+  // Enhanced chat props
+  chatOnSeek?: (timeMs: number) => void;
+  chatOnPlay?: () => void;
+  chatOnHighlight?: (segmentId: string | null) => void;
+  chatSuggestions?: string[];
+  chatCumulativeCostUsd?: number;
+  chatCostWarningLevel?: 'none' | 'primary' | 'escalated';
+  // Mobile support
+  defaultTab?: 'context' | 'people' | 'chat';
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -62,9 +71,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   chatIsLoadingOlder = false,
   conversationTitle = '',
   conversationDurationMs = 0,
-  speakers = {}
+  speakers = {},
+  chatOnSeek,
+  chatOnPlay,
+  chatOnHighlight,
+  chatSuggestions = [],
+  chatCumulativeCostUsd = 0,
+  chatCostWarningLevel = 'none',
+  defaultTab = 'context'
 }) => {
-  const [activeTab, setActiveTab] = useState<'context' | 'people' | 'chat'>('context');
+  const [activeTab, setActiveTab] = useState<'context' | 'people' | 'chat'>(defaultTab);
   const [searchTerm, setSearchTerm] = useState('');
 
   // Filtering based on active tab
@@ -203,11 +219,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
             error={chatError}
             onClearError={chatOnClearError}
             speakers={speakers}
-            onTimestampClick={onNavigateToSegment}
+            onSeek={chatOnSeek}
+            onPlay={chatOnPlay}
+            onHighlight={chatOnHighlight}
             onClearHistoryComplete={chatOnClearHistoryComplete}
             hasOlderMessages={chatHasOlderMessages}
             onLoadOlder={chatOnLoadOlder}
             isLoadingOlder={chatIsLoadingOlder}
+            suggestions={chatSuggestions}
+            cumulativeCostUsd={chatCumulativeCostUsd}
+            costWarningLevel={chatCostWarningLevel}
           />
         </div>
       ) : (
