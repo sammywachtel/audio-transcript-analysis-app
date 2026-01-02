@@ -4,6 +4,49 @@ This document tracks all releases of the Audio Transcript Analysis App.
 
 ---
 
+## v1.7.0-beta (2026-01-02)
+
+### Added
+- **Timestamp Citations** - Clickable `[MM:SS]` links in AI chat responses
+  - Auto-play audio at timestamp
+  - Scroll transcript and highlight segment
+  - Error recovery UI for missing segments
+- **Question Suggestions** - Rotating prompts in chat interface
+  - 44px touch targets with haptic feedback on mobile
+  - Suggestions refresh after each query
+- **Analytics Service** - Track chat interactions and costs
+  - Message sent/received events
+  - Timestamp click tracking
+  - Cost warning events at $0.50 and $1.25 thresholds
+- **Long-press Speaker Reassignment** - Touch-friendly gesture for mobile
+  - 500ms long-press or right-click shows context menu
+  - Keyboard navigation (Arrow keys, Enter, Escape)
+  - Haptic feedback on mobile devices
+- **New Components**
+  - `TimestampLink` - Clickable timestamp citation
+  - `QuestionSuggestions` - Rotating question prompts
+  - `SpeakerContextMenu` - Speaker reassignment menu
+  - `useLongPress` hook - Long-press gesture detection
+
+### Changed
+- **Transcript Segment Redesign** - Cleaner, more consistent layout
+  - Removed left-side per-segment controls
+  - Pill-shaped timestamp buttons with proper touch targets
+  - Tight vertical spacing (py-1.5) for better density
+  - Consistent text alignment across all segments
+- **Mobile Responsiveness Improvements**
+  - Fixed chat FAB positioning with `calc(4rem + 1rem)`
+  - Safe area support for notched devices (`env(safe-area-inset-*)`)
+  - Dynamic viewport height (`100dvh`) for mobile browser chrome
+  - Fixed header button overflow on Viewer and Library pages
+
+### Technical Details
+- `analyticsService.ts` provides event tracking infrastructure
+- `timestampLinking.ts` centralizes timestamp interaction logic
+- `useLongPress.ts` handles gesture detection with scroll cancellation
+
+---
+
 ## v1.6.0-beta (2025-12-31)
 
 ### Added
