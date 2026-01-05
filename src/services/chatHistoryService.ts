@@ -278,6 +278,10 @@ export class ChatHistoryService {
    * Handles Timestamp -> ISO string conversion
    */
   private docToMessage(id: string, doc: ChatHistoryDoc): ChatHistoryMessage {
+    // Handle null createdAt (can happen before serverTimestamp() is resolved)
+    // Real-time listener will update with actual timestamp shortly
+    const createdAt = doc.createdAt?.toDate().toISOString() ?? new Date().toISOString();
+
     return {
       id,
       role: doc.role,
@@ -285,7 +289,7 @@ export class ChatHistoryService {
       ...(doc.sources ? { sources: doc.sources } : {}),
       ...(doc.costUsd !== undefined ? { costUsd: doc.costUsd } : {}),
       ...(doc.isUnanswerable !== undefined ? { isUnanswerable: doc.isUnanswerable } : {}),
-      createdAt: doc.createdAt.toDate().toISOString()
+      createdAt
     };
   }
 }

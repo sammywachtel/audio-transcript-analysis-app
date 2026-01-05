@@ -13,8 +13,7 @@
  */
 
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
-import { defineSecret } from 'firebase-functions/params';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { VertexAI } from '@google-cloud/vertexai';
 import { db } from './index';
 import { buildChatPrompt } from './utils/promptBuilder';
 import {
@@ -27,13 +26,28 @@ import {
   recordChatMetrics,
   calculateChatCost,
   classifyQueryType,
-  ChatTokenUsage
+  ChatTokenUsage,
+  ChatCostResult
 } from './utils/chatMetrics';
+import { buildGeminiLabels } from './utils/llmMetadata';
 import { log } from './logger';
 import type { Conversation } from './types';
 
-// Gemini API key (set via: firebase functions:secrets:set GEMINI_API_KEY)
-const geminiApiKey = defineSecret('GEMINI_API_KEY');
+/**
+ * Create a Vertex AI client for Gemini API calls.
+ * Uses automatic project detection from Cloud Functions environment.
+ * Location defaults to us-central1 unless VERTEX_AI_LOCATION is set.
+ */
+function getVertexAIClient(): VertexAI {
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (!project) {
+    throw new Error('GCP project ID not found in environment');
+  }
+
+  const location = process.env.VERTEX_AI_LOCATION || 'us-central1';
+
+  return new VertexAI({ project, location });
+}
 
 interface ChatRequest {
   conversationId: string;
@@ -62,7 +76,6 @@ export const chatWithConversation = onCall<ChatRequest>(
   {
     region: 'us-central1',
     memory: '512MiB',
-    secrets: [geminiApiKey],
     // CORS: allow all origins (callable functions are already auth-protected)
     cors: true
   },
@@ -130,13 +143,20 @@ export const chatWithConversation = onCall<ChatRequest>(
       // Build prompt with full transcript context
       const prompt = buildChatPrompt(conversation, message);
 
-      // Call Gemini API
-      const genAI = new GoogleGenerativeAI(geminiApiKey.value());
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+      // Call Gemini API via Vertex AI
+      const vertexAI = getVertexAIClient();
+      const model = vertexAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
 
-      const result = await model.generateContent(prompt);
+      // Build labels for billing attribution
+      const labels = buildGeminiLabels(conversationId, userId, 'chat');
+
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        labels
+      });
       const response = result.response;
-      const answerText = response.text();
+      // Vertex AI SDK response structure
+      const answerText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
       // Extract token usage
       const usage = response.usageMetadata;
@@ -154,13 +174,14 @@ export const chatWithConversation = onCall<ChatRequest>(
       const rawSources = segmentIndices.map(index => ({ segmentIndex: index }));
       const validatedSources = validateTimestampSources(rawSources, conversation.segments);
 
-      // Calculate cost
-      const costUsd = calculateChatCost(tokenUsage);
+      // Calculate cost using live pricing from _pricing collection
+      const costResult: ChatCostResult = await calculateChatCost(tokenUsage);
+      const costUsd = costResult.costUsd;
 
       // Calculate response time
       const responseTimeMs = Date.now() - startTime;
 
-      // Record metrics (non-blocking)
+      // Record metrics with pricing snapshot and billing labels (non-blocking)
       const queryType = classifyQueryType(message);
       recordChatMetrics({
         type: 'chat',
@@ -171,7 +192,14 @@ export const chatWithConversation = onCall<ChatRequest>(
         costUsd,
         responseTimeMs,
         sourcesCount: validatedSources.length,
-        isUnanswerable
+        isUnanswerable,
+        geminiLabels: labels,  // Billing labels for cost attribution
+        pricingId: costResult.pricingId,
+        pricingSnapshot: {
+          capturedAt: costResult.capturedAt,
+          inputPricePerMillion: costResult.inputPricePerMillion,
+          outputPricePerMillion: costResult.outputPricePerMillion
+        }
       }).catch(err => {
         log.warn('Failed to record chat metrics (non-blocking)', { error: err });
       });

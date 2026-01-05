@@ -5,15 +5,17 @@
  * Separate from transcription metrics but uses the same collection.
  *
  * Extended schema for chat queries includes:
- * - Token usage and cost tracking
+ * - Token usage and cost tracking (using live pricing from _pricing collection)
  * - Response time monitoring
  * - Query type classification
  * - Source quality metrics
+ * - Pricing snapshot for billing reconciliation
  */
 
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { db } from '../index';
 import { log } from '../logger';
+import { getPricingForModel } from '../metrics';
 
 /**
  * Token usage for a chat query
@@ -23,6 +25,28 @@ export interface ChatTokenUsage {
   outputTokens: number;
   model: string;  // e.g., 'gemini-2.5-flash'
 }
+
+/**
+ * Result from chat cost calculation.
+ * Includes the cost and pricing info for reconciliation.
+ */
+export interface ChatCostResult {
+  costUsd: number;
+  pricingId: string | null;        // _pricing doc ID used, null if default
+  inputPricePerMillion: number;
+  outputPricePerMillion: number;
+  capturedAt: Timestamp;
+}
+
+/**
+ * Default pricing for Gemini 2.5 Flash (as of January 2026).
+ * Used when _pricing collection has no matching entry.
+ * Source: https://cloud.google.com/vertex-ai/generative-ai/pricing
+ */
+const DEFAULT_CHAT_PRICING = {
+  inputPricePerMillion: 0.15,   // $0.15 per 1M input tokens (< 200K context)
+  outputPricePerMillion: 0.60    // $0.60 per 1M output tokens (no reasoning)
+};
 
 /**
  * Chat metrics record for _metrics collection
@@ -37,6 +61,16 @@ export interface ChatMetrics {
   responseTimeMs: number;
   sourcesCount: number;
   isUnanswerable: boolean;
+  // Gemini billing labels for cost attribution (added with Vertex AI migration)
+  // Maps to BigQuery billing exports for automatic cost reconciliation
+  geminiLabels?: Record<string, string>;
+  // Pricing info for billing reconciliation
+  pricingId?: string | null;         // _pricing doc ID used, null if default
+  pricingSnapshot?: {                // Snapshot of rates used for this query
+    capturedAt: Timestamp;
+    inputPricePerMillion: number;
+    outputPricePerMillion: number;
+  };
   timestamp: FieldValue;
 }
 
@@ -77,22 +111,38 @@ export async function recordChatMetrics(
 }
 
 /**
- * Calculate chat cost based on token usage
+ * Calculate chat cost based on token usage.
  *
- * Uses same pricing as transcription (from DEFAULT_PRICING in metrics.ts).
- * Falls back to hardcoded values if pricing lookup fails.
+ * Pulls live pricing from _pricing collection via getPricingForModel.
+ * Falls back to hardcoded defaults if no pricing found in DB.
+ *
+ * Returns full pricing info for billing reconciliation.
  */
-export function calculateChatCost(tokenUsage: ChatTokenUsage): number {
-  // Default pricing for Gemini 2.5 Flash (as of late 2024)
-  const inputPricePerMillion = 0.075;   // $0.075 per 1M input tokens
-  const outputPricePerMillion = 0.30;   // $0.30 per 1M output tokens
+export async function calculateChatCost(tokenUsage: ChatTokenUsage): Promise<ChatCostResult> {
+  const now = new Date();
+
+  // Look up live pricing for the chat model
+  // Note: tokenUsage.model might be 'gemini-2.0-flash-exp' but we use gemini-2.5-flash pricing
+  // since they share the same pricing tier
+  const pricing = await getPricingForModel('gemini-2.5-flash', now);
+
+  const inputPricePerMillion = pricing?.inputPricePerMillion ?? DEFAULT_CHAT_PRICING.inputPricePerMillion;
+  const outputPricePerMillion = pricing?.outputPricePerMillion ?? DEFAULT_CHAT_PRICING.outputPricePerMillion;
 
   const inputCost = (tokenUsage.inputTokens / 1_000_000) * inputPricePerMillion;
   const outputCost = (tokenUsage.outputTokens / 1_000_000) * outputPricePerMillion;
   const totalCost = inputCost + outputCost;
 
   // Round to 6 decimal places (micro-cents precision)
-  return Math.round(totalCost * 1_000_000) / 1_000_000;
+  const costUsd = Math.round(totalCost * 1_000_000) / 1_000_000;
+
+  return {
+    costUsd,
+    pricingId: pricing?.pricingId ?? null,
+    inputPricePerMillion,
+    outputPricePerMillion,
+    capturedAt: Timestamp.now()
+  };
 }
 
 /**

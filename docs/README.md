@@ -17,6 +17,7 @@ Practical guides for solving specific problems.
 - **[Firebase Setup](how-to/firebase-setup.md)** - Configure Firebase project, enable APIs, set secrets
 - **[Deployment](how-to/deploy.md)** - Deploy to Cloud Run and Firebase
 - **[Local Development](how-to/local-development.md)** - Run the app locally
+- **[Query Firestore Emulator](how-to/query-firestore-emulator.md)** - Debug and extract data from local Firestore
 - **[Testing](how-to/testing.md)** - Run and write tests
 
 ### [Reference](reference/) - Information-oriented
@@ -41,6 +42,7 @@ Background and context for design decisions.
 | Configure Firebase from scratch | [Firebase Setup](how-to/firebase-setup.md) |
 | Deploy to production | [Deployment](how-to/deploy.md) |
 | Run locally | [Local Development](how-to/local-development.md) |
+| Debug Firestore emulator data | [Query Firestore Emulator](how-to/query-firestore-emulator.md) |
 | Understand the architecture | [Architecture](reference/architecture.md) |
 
 ## Product Requirements

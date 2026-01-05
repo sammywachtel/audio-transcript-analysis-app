@@ -55,8 +55,8 @@ Technical architecture of the Audio Transcript Analysis App.
         ┌───────┴───────┐
         ▼               ▼
 ┌──────────────┐  ┌──────────────┐
-│  Gemini API  │  │ Replicate    │
-│  (Google AI) │  │ (WhisperX)   │
+│  Vertex AI   │  │ Replicate    │
+│  (Gemini)    │  │ (WhisperX)   │
 └──────────────┘  └──────────────┘
 ```
 
@@ -671,17 +671,41 @@ llmUsage: {
     model: string;
   };
   whisperx: {
-    predictionId: string;
+    predictionId?: string;  // Replicate prediction ID for billing traceability
     computeTimeSeconds: number;
     model: string;  // 'whisperx'
   };
   diarization?: {
-    predictionId: string;
+    predictionId?: string;  // Same as whisperx (runs in same prediction)
     computeTimeSeconds: number;
     model: string;
   };
 }
 ```
+
+### Billing Reconciliation
+
+The cost tracking system supports billing reconciliation through several mechanisms:
+
+**Pricing Snapshots**: Each `_metrics` document includes a `pricingSnapshot` capturing:
+- The exact rates used for cost calculation
+- The `_pricing` document IDs (or null when falling back to defaults)
+- The timestamp when pricing was looked up
+
+This enables historical cost recalculation even after prices change.
+
+**Replicate Prediction IDs**: WhisperX metrics include the actual `predictionId` from Replicate, enabling:
+- Direct correlation with Replicate billing data
+- Verification of compute time estimates
+- Traceability for cost audits
+
+**Vertex AI Request Labels**: All Gemini API calls include billing attribution labels (`functions/src/utils/llmMetadata.ts`):
+- `conversation_id`: Correlates costs with specific conversations
+- `user_id`: Enables per-user cost tracking
+- `call_type`: Distinguishes between different Gemini operations (pre_analysis, analysis, chat, etc.)
+- `environment`: Separates production vs. emulator costs
+
+These labels appear in BigQuery billing exports for automatic cost attribution and reconciliation with usage metrics.
 
 ### Cost Calculation
 
@@ -697,6 +721,8 @@ replicateCost = computeTimeSeconds * pricePerSecond
 ```
 
 Pricing is looked up by model and timestamp, supporting historical accuracy as prices change.
+
+**Important**: For Replicate services (WhisperX), we use **actual GPU compute time** from `metrics.predict_time` in the prediction response, not wall-clock duration. Wall-clock time includes queue time (1-2s) and network latency (~10-15s overhead), which would inflate cost estimates by ~3-4x. The actual compute time accurately reflects what Replicate bills for.
 
 ### User Activity Tracking
 
@@ -833,12 +859,29 @@ Behavior:
 
 ## Google Cloud Infrastructure
 
+### Vertex AI SDK Integration
+
+The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migrated from `@google/generative-ai` to enable billing labels). Cloud Functions authenticate automatically using the default service account.
+
+**Environment Variables:**
+- `GCLOUD_PROJECT` or `GCP_PROJECT`: Auto-detected by Cloud Functions
+- `VERTEX_AI_LOCATION`: Defaults to `us-central1` if not set
+
+**Required IAM Permission:**
+- The Cloud Functions service account (`PROJECT@appspot.gserviceaccount.com`) requires `roles/aiplatform.endpoints.predict` to call Vertex AI models.
+
+**WhisperX Prediction Tracking:**
+- `transcribeWithWhisperX()` and `transcribeWithWhisperXRobust()` both return `predictionId` from Replicate's predictions API
+- Stored in `_metrics` documents for correlation with Replicate billing data
+- Enables traceability and cost audit for WhisperX transcription jobs
+
 ### Required APIs
 
 The application requires the following Google Cloud APIs:
 
 | API | Service | Purpose |
 |-----|---------|---------|
+| `aiplatform.googleapis.com` | Vertex AI | Gemini API calls with billing labels |
 | `cloudfunctions.googleapis.com` | Cloud Functions | Serverless function execution |
 | `cloudscheduler.googleapis.com` | Cloud Scheduler | Scheduled functions (daily stats aggregation) |
 | `cloudbuild.googleapis.com` | Cloud Build | Build container images for functions |
@@ -846,7 +889,7 @@ The application requires the following Google Cloud APIs:
 | `run.googleapis.com` | Cloud Run | Functions v2 runtime (functions run as containers) |
 | `eventarc.googleapis.com` | Eventarc | Route Storage events to Cloud Functions |
 | `pubsub.googleapis.com` | Pub/Sub | Event message delivery (used by Eventarc) |
-| `secretmanager.googleapis.com` | Secret Manager | Secure storage for GEMINI_API_KEY and REPLICATE_API_TOKEN |
+| `secretmanager.googleapis.com` | Secret Manager | Secure storage for REPLICATE_API_TOKEN and HUGGINGFACE_ACCESS_TOKEN |
 | `firestore.googleapis.com` | Firestore | NoSQL database |
 | `storage.googleapis.com` | Cloud Storage | Audio file storage |
 | `iamcredentials.googleapis.com` | IAM Credentials | Workload Identity for CI/CD |
@@ -889,15 +932,16 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
                                  ▼
                         ┌──────────────────┐
                         │  Secret Manager  │
-                        │  GEMINI_API_KEY  │
                         │  REPLICATE_TOKEN │
+                        │  HUGGINGFACE_    │
+                        │  ACCESS_TOKEN    │
                         └────────┬─────────┘
                                  │
                         ┌────────┴────────┐
                         ▼                 ▼
                 ┌──────────────┐  ┌──────────────┐
-                │  Gemini API  │  │  Replicate   │
-                │ (transcript) │  │  (WhisperX)  │
+                │  Vertex AI   │  │  Replicate   │
+                │  (Gemini)    │  │  (WhisperX)  │
                 └──────┬───────┘  └──────┬───────┘
                        │                 │
                        └────────┬────────┘

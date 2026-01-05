@@ -151,16 +151,26 @@ interface TranscriptionMetricsDoc {
       model: string;
     };
     whisperx: {
-      predictionId?: string;
-      computeTimeSeconds: number;
+      predictionId?: string;  // Replicate prediction ID for cost traceability
+      computeTimeSeconds: number;  // Actual GPU compute time from Replicate metrics.predict_time (not wall-clock)
       model: string;
     };
     diarization?: {
-      predictionId?: string;
+      predictionId?: string;  // Same as whisperx (diarization runs in same prediction)
       computeTimeSeconds: number;
       model: string;
     };
   };
+
+  // Gemini billing labels for cost attribution (added with Vertex AI migration)
+  // Array of label objects from each Gemini API call (pre-analysis, analysis, speaker ID, speaker correction)
+  // Maps to BigQuery billing exports for automatic cost reconciliation
+  geminiLabels?: Array<{
+    conversation_id: string;
+    user_id: string;
+    call_type: 'pre_analysis' | 'fallback_transcription' | 'analysis' | 'speaker_identification' | 'speaker_correction';
+    environment: string;  // 'production' | 'development'
+  }>;
 
   // Estimated costs (calculated from _pricing collection)
   estimatedCost?: {
@@ -168,6 +178,21 @@ interface TranscriptionMetricsDoc {
     whisperxUsd: number;
     diarizationUsd: number;
     totalUsd: number;
+  };
+
+  // Pricing snapshot for billing reconciliation (added for cost visibility)
+  // Captures the exact rates used so costs can be audited even after price changes
+  pricingSnapshot?: {
+    capturedAt: Timestamp;            // When the pricing was looked up
+    geminiPricingId: string | null;   // _pricing doc ID used, or null if default
+    whisperxPricingId: string | null;
+    diarizationPricingId: string | null;
+    rates: {
+      geminiInputPerMillion: number;  // USD per 1M input tokens
+      geminiOutputPerMillion: number; // USD per 1M output tokens
+      whisperxPerSecond: number;      // USD per compute second
+      diarizationPerSecond: number;   // USD per compute second
+    };
   };
 
   // Timestamp
@@ -197,6 +222,24 @@ interface ChatMetricsDoc {
   // Response quality
   sourcesCount: number;         // Number of validated timestamp sources
   isUnanswerable: boolean;      // Whether LLM indicated question was unanswerable
+
+  // Gemini billing labels for cost attribution (added with Vertex AI migration)
+  // Single label object for this chat query
+  // Maps to BigQuery billing exports for automatic cost reconciliation
+  geminiLabels?: {
+    conversation_id: string;
+    user_id: string;
+    call_type: 'chat';
+    environment: string;  // 'production' | 'development'
+  };
+
+  // Pricing info for billing reconciliation (added for cost visibility)
+  pricingId?: string | null;    // _pricing doc ID used, or null if default
+  pricingSnapshot?: {
+    capturedAt: Timestamp;
+    inputPricePerMillion: number;
+    outputPricePerMillion: number;
+  };
 
   // Timestamp
   timestamp: Timestamp;

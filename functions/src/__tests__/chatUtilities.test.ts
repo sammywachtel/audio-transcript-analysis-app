@@ -6,11 +6,20 @@
  * just the core utility logic.
  */
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+
+// Mock the metrics module before importing anything that uses it
+jest.mock('../metrics', () => ({
+  getPricingForModel: jest.fn()
+}));
+
 import { buildChatPrompt } from '../utils/promptBuilder';
 import { validateTimestampSources, extractSegmentIndices } from '../utils/timestampValidation';
 import { calculateChatCost, classifyQueryType } from '../utils/chatMetrics';
+import { getPricingForModel } from '../metrics';
 import type { Conversation, Segment, Speaker } from '../types';
+
+const mockGetPricingForModel = getPricingForModel as jest.MockedFunction<typeof getPricingForModel>;
 
 describe('Chat Utilities', () => {
   describe('buildChatPrompt', () => {
@@ -124,29 +133,108 @@ describe('Chat Utilities', () => {
   });
 
   describe('calculateChatCost', () => {
-    it('should calculate cost based on token usage', () => {
+    beforeEach(() => {
+      mockGetPricingForModel.mockReset();
+    });
+
+    it('should calculate cost using pricing from database', async () => {
+      // Mock successful pricing lookup from Firestore
+      mockGetPricingForModel.mockResolvedValue({
+        pricingId: 'pricing_123',
+        model: 'gemini-2.5-flash',
+        service: 'gemini',
+        inputPricePerMillion: 0.075,
+        outputPricePerMillion: 0.30,
+        effectiveFrom: { toDate: () => new Date('2024-01-01') } as any,
+        createdAt: { toDate: () => new Date('2024-01-01') } as any,
+        updatedAt: { toDate: () => new Date('2024-01-01') } as any
+      });
+
       const tokenUsage = {
         inputTokens: 1000,
         outputTokens: 500,
         model: 'gemini-2.5-flash'
       };
 
-      const cost = calculateChatCost(tokenUsage);
+      const result = await calculateChatCost(tokenUsage);
 
       // Expected: (1000/1M * 0.075) + (500/1M * 0.30) = 0.000075 + 0.00015 = 0.000225
-      expect(cost).toBeCloseTo(0.000225, 6);
+      expect(result.costUsd).toBeCloseTo(0.000225, 6);
+      expect(result.pricingId).toBe('pricing_123');
+      expect(result.inputPricePerMillion).toBe(0.075);
+      expect(result.outputPricePerMillion).toBe(0.30);
+      expect(mockGetPricingForModel).toHaveBeenCalledWith('gemini-2.5-flash', expect.any(Date));
     });
 
-    it('should handle zero tokens', () => {
+    it('should fallback to default pricing when database returns null', async () => {
+      // Mock pricing lookup failure (no pricing in database)
+      mockGetPricingForModel.mockResolvedValue(null);
+
+      const tokenUsage = {
+        inputTokens: 1000,
+        outputTokens: 500,
+        model: 'gemini-2.5-flash'
+      };
+
+      const result = await calculateChatCost(tokenUsage);
+
+      // Should still calculate correctly with default pricing
+      expect(result.costUsd).toBeCloseTo(0.000225, 6);
+      expect(result.pricingId).toBeNull();
+      expect(result.inputPricePerMillion).toBe(0.075);  // Default values
+      expect(result.outputPricePerMillion).toBe(0.30);
+    });
+
+    it('should handle zero tokens', async () => {
+      mockGetPricingForModel.mockResolvedValue({
+        pricingId: 'pricing_123',
+        model: 'gemini-2.5-flash',
+        service: 'gemini',
+        inputPricePerMillion: 0.075,
+        outputPricePerMillion: 0.30,
+        effectiveFrom: { toDate: () => new Date('2024-01-01') } as any,
+        createdAt: { toDate: () => new Date('2024-01-01') } as any,
+        updatedAt: { toDate: () => new Date('2024-01-01') } as any
+      });
+
       const tokenUsage = {
         inputTokens: 0,
         outputTokens: 0,
         model: 'gemini-2.5-flash'
       };
 
-      const cost = calculateChatCost(tokenUsage);
+      const result = await calculateChatCost(tokenUsage);
 
-      expect(cost).toBe(0);
+      expect(result.costUsd).toBe(0);
+      expect(result.pricingId).toBe('pricing_123');
+    });
+
+    it('should handle different pricing values from database', async () => {
+      // Simulate a price change in the database
+      mockGetPricingForModel.mockResolvedValue({
+        pricingId: 'pricing_456',
+        model: 'gemini-2.5-flash',
+        service: 'gemini',
+        inputPricePerMillion: 0.10,   // Higher input price
+        outputPricePerMillion: 0.40,  // Higher output price
+        effectiveFrom: { toDate: () => new Date('2025-01-01') } as any,
+        createdAt: { toDate: () => new Date('2025-01-01') } as any,
+        updatedAt: { toDate: () => new Date('2025-01-01') } as any
+      });
+
+      const tokenUsage = {
+        inputTokens: 1000,
+        outputTokens: 500,
+        model: 'gemini-2.5-flash'
+      };
+
+      const result = await calculateChatCost(tokenUsage);
+
+      // Expected: (1000/1M * 0.10) + (500/1M * 0.40) = 0.0001 + 0.0002 = 0.0003
+      expect(result.costUsd).toBeCloseTo(0.0003, 6);
+      expect(result.pricingId).toBe('pricing_456');
+      expect(result.inputPricePerMillion).toBe(0.10);
+      expect(result.outputPricePerMillion).toBe(0.40);
     });
   });
 
