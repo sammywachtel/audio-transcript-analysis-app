@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Large File Upload Timeouts** - Audio files up to 50MB now process reliably
+  - Gemini API calls configured with 10-minute timeout (prevents `HeadersTimeoutError` on large uploads)
+  - Replicate API calls configured with 3-minute timeout via custom fetch wrapper
+  - Gateway errors (502/503/504) now trigger automatic retries in WhisperX transcription
+
 ## [1.8.0-beta] - 2026-01-05
 
 ### Added
