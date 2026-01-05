@@ -16,7 +16,7 @@
 
 import React, { useState } from 'react';
 import { Button } from '../components/Button';
-import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap } from 'lucide-react';
+import { ArrowLeft, Activity, Users, Loader2, DollarSign, TrendingUp, Clock, FileAudio, RefreshCw, Zap, MessageSquare } from 'lucide-react';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
 // Hooks
@@ -25,7 +25,8 @@ import {
   useDailyStats,
   useAllUserStatsSummaries,
   useRecentMetrics,
-  useUserStats
+  useUserStats,
+  useChatMetrics
 } from '../hooks/useMetrics';
 
 // Components
@@ -39,14 +40,16 @@ import {
 } from '../components/metrics';
 import { formatDuration, formatUsd } from '../services/metricsService';
 import { PricingManager } from '../components/admin/PricingManager';
+import { ChatMetricsTable } from '../components/admin/ChatMetricsTable';
 
 interface AdminDashboardProps {
   onBack: () => void;
+  onJobClick?: (metricId: string) => void;
 }
 
-type TabId = 'overview' | 'users' | 'jobs' | 'pricing';
+type TabId = 'overview' | 'users' | 'jobs' | 'chat' | 'pricing';
 
-export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack, onJobClick }) => {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState(30); // Last N days
@@ -56,11 +59,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   const dailyStats = useDailyStats({ days: dateRange });
   const userSummaries = useAllUserStatsSummaries(100);
   const recentMetrics = useRecentMetrics({ maxResults: 50 });
+  const chatMetrics = useChatMetrics({ maxResults: 100 });
 
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: 'overview', label: 'Overview', icon: <Activity size={16} /> },
     { id: 'users', label: 'Users', icon: <Users size={16} /> },
     { id: 'jobs', label: 'Jobs', icon: <Clock size={16} /> },
+    { id: 'chat', label: 'Chat', icon: <MessageSquare size={16} /> },
     { id: 'pricing', label: 'Pricing', icon: <DollarSign size={16} /> },
   ];
 
@@ -119,7 +124,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         )}
 
         {activeTab === 'jobs' && (
-          <JobsTab recentMetrics={recentMetrics} />
+          <JobsTab recentMetrics={recentMetrics} onJobClick={onJobClick} />
+        )}
+
+        {activeTab === 'chat' && (
+          <ChatTab chatMetrics={chatMetrics} />
         )}
 
         {activeTab === 'pricing' && (
@@ -619,9 +628,10 @@ const UserDetailView: React.FC<UserDetailViewProps> = ({ userId, userStats, onBa
 
 interface JobsTabProps {
   recentMetrics: ReturnType<typeof useRecentMetrics>;
+  onJobClick?: (metricId: string) => void;
 }
 
-const JobsTab: React.FC<JobsTabProps> = ({ recentMetrics }) => {
+const JobsTab: React.FC<JobsTabProps> = ({ recentMetrics, onJobClick }) => {
   const { data: metrics, loading, error, refetch } = recentMetrics;
 
   if (error) {
@@ -631,6 +641,12 @@ const JobsTab: React.FC<JobsTabProps> = ({ recentMetrics }) => {
       </div>
     );
   }
+
+  const handleRowClick = (metric: { id?: string }) => {
+    if (onJobClick && metric.id) {
+      onJobClick(metric.id);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -648,8 +664,58 @@ const JobsTab: React.FC<JobsTabProps> = ({ recentMetrics }) => {
         <MetricsTable
           metrics={metrics}
           showUserId={true}
+          onRowClick={handleRowClick}
         />
       )}
+    </div>
+  );
+};
+
+// =============================================================================
+// Chat Tab
+// =============================================================================
+
+interface ChatTabProps {
+  chatMetrics: ReturnType<typeof useChatMetrics>;
+}
+
+const ChatTab: React.FC<ChatTabProps> = ({ chatMetrics }) => {
+  const { data: metrics, loading, error, refetch } = chatMetrics;
+
+  if (error) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
+        Failed to load chat metrics: {error.message}
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="animate-pulse space-y-4">
+        <div className="h-8 bg-slate-200 rounded w-1/4" />
+        <div className="bg-white rounded-lg border border-slate-200 p-8">
+          <div className="h-4 bg-slate-200 rounded w-full mb-4" />
+          <div className="h-4 bg-slate-200 rounded w-3/4" />
+        </div>
+      </div>
+    );
+  }
+
+  // Check if any metrics are missing pricing snapshots
+  const hasMissingPricing = metrics.some(m => !m.pricingSnapshot);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-slate-900">Chat Activity</h2>
+        <Button variant="ghost" size="sm" onClick={refetch} className="gap-2">
+          <RefreshCw size={14} />
+          Refresh
+        </Button>
+      </div>
+
+      <ChatMetricsTable metrics={metrics} showPricingWarning={hasMissingPricing} />
     </div>
   );
 };

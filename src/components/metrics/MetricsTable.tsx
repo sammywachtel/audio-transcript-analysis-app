@@ -8,6 +8,7 @@
 import React, { useState } from 'react';
 import { cn } from '@/utils';
 import { ProcessingMetric, formatDuration, formatUsd } from '../../services/metricsService';
+import { CostVerificationBadge } from './CostVerificationBadge';
 
 interface MetricsTableProps {
   metrics: ProcessingMetric[];
@@ -196,6 +197,16 @@ const MetricDetails: React.FC<{ metric: ProcessingMetric }> = ({ metric }) => (
       <p className="text-slate-500 mb-1">Terms</p>
       <p className="font-medium text-slate-900">{metric.termCount}</p>
     </div>
+
+    {/* Cost Verification Badge */}
+    {metric.estimatedCost && (
+      <div className="col-span-2 md:col-span-4 mt-2 pt-2 border-t border-slate-200">
+        <div className="flex items-center gap-2">
+          <p className="text-slate-500">Cost Verification:</p>
+          <CostVerificationBadge metric={metric} />
+        </div>
+      </div>
+    )}
 
     {metric.timingMs && (
       <>
