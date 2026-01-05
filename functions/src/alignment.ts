@@ -45,6 +45,30 @@ const MAX_OVERLAP_MS = 2000;  // Max overlap between consecutive segments (raise
 const MIN_MS_PER_WORD = 20;  // Minimum milliseconds per word (lowered from 30)
 const MAX_MS_PER_WORD = 800;  // Maximum milliseconds per word (raised from 600)
 
+// Replicate API timeout (3 minutes) - large audio uploads need time
+const REPLICATE_TIMEOUT_MS = 180_000;
+
+/**
+ * Create a fetch wrapper with timeout support for Replicate client.
+ * The Replicate SDK v1.x doesn't have built-in timeout, so we use AbortController.
+ */
+function createTimeoutFetch(timeoutMs: number): typeof globalThis.fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await globalThis.fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+}
+
 // =============================================================================
 // Data Types
 // =============================================================================
@@ -1290,7 +1314,7 @@ async function getWhisperxTimestamps(
 
   try {
     // Call whisper-diarization-advanced via Replicate
-    const client = new Replicate({ auth: replicateToken });
+    const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
 
     const startTime = Date.now();
     const output = await client.run(
@@ -1511,7 +1535,7 @@ export async function transcribeWithWhisperX(
 
     // Call whisper-diarization-advanced via Replicate
     const Replicate = (await import('replicate')).default;
-    const client = new Replicate({ auth: replicateToken });
+    const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
 
     // Build input params - rafaelgalle/whisper-diarization-advanced has built-in diarization
     const inputParams: Record<string, unknown> = {
@@ -1740,7 +1764,7 @@ export async function transcribeWithWhisperXRobust(
 
       // Use predictions API for more control
       const Replicate = (await import('replicate')).default;
-      const client = new Replicate({ auth: replicateToken });
+      const client = new Replicate({ auth: replicateToken, fetch: createTimeoutFetch(REPLICATE_TIMEOUT_MS) });
 
       const inputParams: Record<string, unknown> = {
         file_string: audioBase64,
@@ -1811,11 +1835,17 @@ export async function transcribeWithWhisperXRobust(
       const errorMsg = error instanceof Error ? error.message : String(error);
       lastError = errorMsg;
 
-      // Check if error is retryable
+      // Check if error is retryable - includes gateway errors for large payloads
       const isRetryable = errorMsg.includes('JSON') ||
                           errorMsg.includes('timeout') ||
                           errorMsg.includes('ETIMEDOUT') ||
-                          errorMsg.includes('ECONNRESET');
+                          errorMsg.includes('ECONNRESET') ||
+                          errorMsg.includes('502') ||
+                          errorMsg.includes('503') ||
+                          errorMsg.includes('504') ||
+                          errorMsg.includes('Bad Gateway') ||
+                          errorMsg.includes('Service Unavailable') ||
+                          errorMsg.includes('Gateway Timeout');
 
       if (isRetryable && attempt < maxRetries) {
         const backoffMs = 5000 * attempt;

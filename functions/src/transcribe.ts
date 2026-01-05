@@ -31,6 +31,17 @@ import { buildGeminiLabels } from './utils/llmMetadata';
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For speaker diarization
 
+// =============================================================================
+// Timeout Configuration
+// =============================================================================
+
+/**
+ * Timeout for Gemini API requests (10 minutes).
+ * Large audio files (46MB+) need extra time for upload and processing.
+ * The default undici timeout (~5min) is insufficient for these payloads.
+ */
+const GEMINI_REQUEST_TIMEOUT_MS = 600_000;
+
 /**
  * Create a Vertex AI client for Gemini API calls.
  * Uses automatic project detection from Cloud Functions environment.
@@ -400,7 +411,7 @@ async function preAnalyzeAudioWithGemini(
         required: ['speakerCount', 'speakers', 'title', 'topics', 'terms', 'people']
       }
     }
-  });
+  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
   // Convert audio to base64
   const audioBase64 = audioBuffer.toString('base64');
@@ -575,7 +586,7 @@ async function transcribeWithGeminiFallback(
           required: ['segments']
         }
       }
-    });
+    }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
     // Convert audio to base64 for Gemini
     const audioBase64 = audioBuffer.toString('base64');
@@ -1920,7 +1931,7 @@ async function analyzeTranscriptWithGemini(
         required: ['title', 'topics', 'terms', 'people']
       }
     }
-  });
+  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
   // Format transcript with segment indices and speaker labels
   const formattedTranscript = segments.map((seg, idx) => {
@@ -2051,7 +2062,7 @@ async function identifySpeakersFromContent(
         required: ['speakerNotes']
       }
     }
-  });
+  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
   // Format transcript with actual SPEAKER_XX labels from WhisperX
   const formattedTranscript = segments.map((seg, idx) => {
@@ -2204,7 +2215,7 @@ async function identifySpeakerReassignments(
         required: ['corrections']
       }
     }
-  });
+  }, { timeout: GEMINI_REQUEST_TIMEOUT_MS });
 
   // Format transcript with segment indices and speaker labels
   const formattedTranscript = segments.map((seg, idx) => {
