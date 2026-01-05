@@ -59,6 +59,7 @@ export interface EstimatedCost {
  * Processing metrics (from _metrics collection)
  */
 export interface ProcessingMetric {
+  id?: string;  // Firestore document ID (added by query functions)
   conversationId: string;
   userId: string;
   status: 'success' | 'failed';
@@ -84,7 +85,44 @@ export interface ProcessingMetric {
   durationMs: number;
   llmUsage?: LLMUsage;
   estimatedCost?: EstimatedCost;
+  pricingSnapshot?: PricingSnapshot;  // Captured pricing rates used for cost calculation
   timestamp: Timestamp;
+}
+
+/**
+ * Chat metrics (from _metrics collection with type: 'chat')
+ */
+export interface ChatTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+export interface ChatMetric {
+  id?: string;  // Firestore document ID (added by query functions)
+  type: 'chat';
+  conversationId: string;
+  userId: string;
+  queryType: 'question' | 'follow_up';
+  tokenUsage: ChatTokenUsage;
+  costUsd: number;
+  responseTimeMs: number;
+  sourcesCount: number;
+  isUnanswerable: boolean;
+  geminiLabels?: Record<string, string>;
+  pricingId?: string | null;
+  pricingSnapshot?: PricingSnapshot;
+  timestamp: Timestamp;
+}
+
+/**
+ * Pricing snapshot captured at metric recording time
+ */
+export interface PricingSnapshot {
+  capturedAt: Timestamp;
+  inputPricePerMillion?: number;
+  outputPricePerMillion?: number;
+  pricePerSecond?: number;
 }
 
 /**
@@ -322,7 +360,10 @@ export async function getRecentMetrics(
     }
 
     const snapshot = await getDocs(q);
-    let results = snapshot.docs.map(doc => doc.data() as ProcessingMetric);
+    let results = snapshot.docs.map(doc => ({
+      ...(doc.data() as ProcessingMetric),
+      id: doc.id  // Include Firestore document ID for detail views
+    }));
 
     // Apply status filter client-side (minor optimization potential but keeps code simple)
     if (status) {
@@ -460,4 +501,227 @@ export function getDateRange(days: number): { startDate: string; endDate: string
     startDate: start.toISOString().split('T')[0],
     endDate: end.toISOString().split('T')[0]
   };
+}
+
+// =============================================================================
+// New Functions for Cost Verification & Chat Metrics
+// =============================================================================
+
+/**
+ * Get single metric by document ID
+ */
+export async function getMetricById(metricId: string): Promise<ProcessingMetric | ChatMetric | null> {
+  try {
+    const docRef = doc(db, '_metrics', metricId);
+    const snapshot = await getDoc(docRef);
+
+    if (!snapshot.exists()) {
+      console.warn('[MetricsService] No metric found with ID:', metricId);
+      return null;
+    }
+
+    const docData = snapshot.data();
+    const data = { ...docData, id: snapshot.id };
+    // Check if it's a chat metric or processing metric
+    if ('type' in docData && docData.type === 'chat') {
+      return data as ChatMetric;
+    }
+    return data as ProcessingMetric;
+  } catch (error) {
+    console.error('[MetricsService] Failed to fetch metric by ID:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get chat metrics with optional filtering
+ */
+export async function getChatMetrics(options?: {
+  conversationId?: string;
+  maxResults?: number;
+  startDate?: Date;
+  endDate?: Date;
+}): Promise<ChatMetric[]> {
+  try {
+    const { conversationId, maxResults = 100, startDate, endDate } = options || {};
+
+    // Build query constraints
+    const constraints = [
+      where('type', '==', 'chat'),
+      orderBy('timestamp', 'desc')
+    ];
+
+    if (conversationId) {
+      constraints.unshift(where('conversationId', '==', conversationId));
+    }
+
+    if (startDate) {
+      constraints.push(where('timestamp', '>=', Timestamp.fromDate(startDate)));
+    }
+
+    if (endDate) {
+      constraints.push(where('timestamp', '<=', Timestamp.fromDate(endDate)));
+    }
+
+    const q = query(collection(db, '_metrics'), ...constraints, limit(maxResults));
+    const snapshot = await getDocs(q);
+
+    return snapshot.docs.map(doc => ({
+      ...(doc.data() as ChatMetric),
+      id: doc.id  // Include Firestore document ID for detail views
+    }));
+  } catch (error) {
+    console.error('[MetricsService] Failed to fetch chat metrics:', error);
+    throw error;
+  }
+}
+
+/**
+ * Cost variance status type
+ */
+export type VarianceStatus = 'match' | 'minor' | 'significant';
+
+/**
+ * Recalculate cost using current pricing vs stored snapshot
+ */
+export async function recalculateCostWithCurrentPricing(
+  metric: ProcessingMetric | ChatMetric
+): Promise<{
+  originalUsd: number;
+  recalculatedUsd: number;
+  variance: number;
+  variancePercent: number;
+  status: VarianceStatus;
+}> {
+  try {
+    // Determine original cost
+    let originalUsd = 0;
+    if ('estimatedCost' in metric && metric.estimatedCost) {
+      originalUsd = metric.estimatedCost.totalUsd;
+    } else if ('costUsd' in metric) {
+      originalUsd = metric.costUsd;
+    }
+
+    // If no pricing snapshot, can't recalculate - return original as both
+    if (!metric.pricingSnapshot) {
+      return {
+        originalUsd,
+        recalculatedUsd: originalUsd,
+        variance: 0,
+        variancePercent: 0,
+        status: 'match'
+      };
+    }
+
+    // Recalculate based on metric type
+    let recalculatedUsd = 0;
+
+    if ('type' in metric && metric.type === 'chat') {
+      // Chat metric recalculation
+      const chatMetric = metric as ChatMetric;
+      const currentPricing = await getCurrentPricing(chatMetric.tokenUsage.model);
+
+      if (currentPricing) {
+        const inputCost = (chatMetric.tokenUsage.inputTokens / 1_000_000) *
+          (currentPricing.inputPricePerMillion || 0);
+        const outputCost = (chatMetric.tokenUsage.outputTokens / 1_000_000) *
+          (currentPricing.outputPricePerMillion || 0);
+        recalculatedUsd = inputCost + outputCost;
+      } else {
+        // No current pricing found, use snapshot
+        recalculatedUsd = originalUsd;
+      }
+    } else {
+      // Processing metric recalculation
+      const processingMetric = metric as ProcessingMetric;
+
+      if (!processingMetric.llmUsage) {
+        return {
+          originalUsd,
+          recalculatedUsd: originalUsd,
+          variance: 0,
+          variancePercent: 0,
+          status: 'match'
+        };
+      }
+
+      // Recalculate Gemini costs
+      const geminiAnalysisPricing = await getCurrentPricing(processingMetric.llmUsage.geminiAnalysis.model);
+      let geminiUsd = 0;
+
+      if (geminiAnalysisPricing) {
+        const inputCost = (processingMetric.llmUsage.geminiAnalysis.inputTokens / 1_000_000) *
+          (geminiAnalysisPricing.inputPricePerMillion || 0);
+        const outputCost = (processingMetric.llmUsage.geminiAnalysis.outputTokens / 1_000_000) *
+          (geminiAnalysisPricing.outputPricePerMillion || 0);
+        geminiUsd += inputCost + outputCost;
+      }
+
+      // Add speaker correction if exists
+      if (processingMetric.llmUsage.geminiSpeakerCorrection) {
+        const speakerPricing = await getCurrentPricing(processingMetric.llmUsage.geminiSpeakerCorrection.model);
+        if (speakerPricing) {
+          const inputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.inputTokens / 1_000_000) *
+            (speakerPricing.inputPricePerMillion || 0);
+          const outputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.outputTokens / 1_000_000) *
+            (speakerPricing.outputPricePerMillion || 0);
+          geminiUsd += inputCost + outputCost;
+        }
+      }
+
+      // Recalculate WhisperX cost
+      let whisperxUsd = 0;
+      if (processingMetric.llmUsage.whisperx) {
+        const whisperxPricing = await getCurrentPricing(processingMetric.llmUsage.whisperx.model);
+        if (whisperxPricing && whisperxPricing.pricePerSecond) {
+          whisperxUsd = processingMetric.llmUsage.whisperx.computeTimeSeconds * whisperxPricing.pricePerSecond;
+        }
+      }
+
+      // Recalculate diarization cost if exists
+      let diarizationUsd = 0;
+      if (processingMetric.llmUsage.diarization) {
+        const diarizationPricing = await getCurrentPricing(processingMetric.llmUsage.diarization.model);
+        if (diarizationPricing && diarizationPricing.pricePerSecond) {
+          diarizationUsd = processingMetric.llmUsage.diarization.computeTimeSeconds * diarizationPricing.pricePerSecond;
+        }
+      }
+
+      recalculatedUsd = geminiUsd + whisperxUsd + diarizationUsd;
+    }
+
+    // Calculate variance
+    const variance = recalculatedUsd - originalUsd;
+    const variancePercent = originalUsd > 0 ? Math.abs(variance / originalUsd) * 100 : 0;
+
+    // Determine status based on variance thresholds
+    let status: VarianceStatus = 'match';
+    if (variancePercent > 5) {
+      status = 'significant';
+    } else if (variancePercent > 1) {
+      status = 'minor';
+    }
+
+    return {
+      originalUsd,
+      recalculatedUsd,
+      variance,
+      variancePercent,
+      status
+    };
+  } catch (error) {
+    console.error('[MetricsService] Failed to recalculate cost:', error);
+    // Return original values on error
+    const originalUsd = ('estimatedCost' in metric && metric.estimatedCost)
+      ? metric.estimatedCost.totalUsd
+      : ('costUsd' in metric ? metric.costUsd : 0);
+
+    return {
+      originalUsd,
+      recalculatedUsd: originalUsd,
+      variance: 0,
+      variancePercent: 0,
+      status: 'match'
+    };
+  }
 }

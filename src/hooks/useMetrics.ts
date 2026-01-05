@@ -21,10 +21,13 @@ import {
   getPricingConfigs,
   getCurrentPricing,
   getDateRange,
+  getMetricById,
+  getChatMetrics,
   GlobalStats,
   DailyStats,
   UserStats,
   ProcessingMetric,
+  ChatMetric,
   PricingConfig
 } from '../services/metricsService';
 import { Timestamp } from 'firebase/firestore';
@@ -489,4 +492,185 @@ export function useCurrentPricing(model: string): UseQueryResult<PricingConfig> 
  */
 export function useMyStats(): UseQueryResult<UserStats> {
   return useUserStats();
+}
+
+// =============================================================================
+// New Hooks for Admin Dashboard Features
+// =============================================================================
+
+/**
+ * Fetch a single metric by ID
+ */
+export function useMetric(metricId: string | null): UseQueryResult<ProcessingMetric | ChatMetric> {
+  const { user } = useAuth();
+  const [data, setData] = useState<ProcessingMetric | ChatMetric | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [refetchTrigger, setRefetchTrigger] = useState(0);
+
+  const refetch = useCallback(() => {
+    setRefetchTrigger(prev => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!user || !metricId) {
+      setData(null);
+      setLoading(false);
+      setError(metricId ? new Error('Authentication required') : null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    getMetricById(metricId)
+      .then(result => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.error('[useMetric] Failed to fetch:', err);
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, metricId, refetchTrigger]);
+
+  return { data, loading, error, refetch };
+}
+
+/**
+ * Fetch chat metrics with optional filtering
+ */
+export function useChatMetrics(options?: {
+  conversationId?: string;
+  maxResults?: number;
+  startDate?: Date;
+  endDate?: Date;
+}): UseQueryArrayResult<ChatMetric> {
+  const { user } = useAuth();
+  const [data, setData] = useState<ChatMetric[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [refetchTrigger, setRefetchTrigger] = useState(0);
+
+  const refetch = useCallback(() => {
+    setRefetchTrigger(prev => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setData([]);
+      setLoading(false);
+      setError(new Error('Authentication required'));
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    getChatMetrics(options)
+      .then(result => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.error('[useChatMetrics] Failed to fetch:', err);
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, options?.conversationId, options?.maxResults, options?.startDate, options?.endDate, refetchTrigger]);
+
+  return { data, loading, error, refetch };
+}
+
+/**
+ * Fetch data for cost reconciliation report
+ * Returns both processing and chat metrics plus pricing configs
+ */
+export function useReconciliationData(options: {
+  days?: number;
+  startDate?: Date;
+  endDate?: Date;
+} = {}): {
+  metrics: (ProcessingMetric | ChatMetric)[];
+  pricingConfigs: PricingConfig[];
+  loading: boolean;
+  error: Error | null;
+  refetch: () => void;
+} {
+  const { user, isAdmin } = useAuth();
+  const [metrics, setMetrics] = useState<(ProcessingMetric | ChatMetric)[]>([]);
+  const [pricingConfigs, setPricingConfigs] = useState<PricingConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [refetchTrigger, setRefetchTrigger] = useState(0);
+
+  const refetch = useCallback(() => {
+    setRefetchTrigger(prev => prev + 1);
+  }, []);
+
+  const { days = 30, startDate, endDate } = options;
+
+  useEffect(() => {
+    if (!user || !isAdmin) {
+      setMetrics([]);
+      setPricingConfigs([]);
+      setLoading(false);
+      setError(new Error('Admin access required'));
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    // Fetch both processing and chat metrics in parallel
+    Promise.all([
+      getRecentMetrics({ maxResults: 1000 }), // Get processing metrics
+      getChatMetrics({
+        maxResults: 1000,
+        startDate: startDate || new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+        endDate: endDate || new Date()
+      }),
+      getPricingConfigs()
+    ])
+      .then(([processingMetrics, chatMetrics, pricing]) => {
+        if (!cancelled) {
+          setMetrics([...processingMetrics, ...chatMetrics]);
+          setPricingConfigs(pricing);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.error('[useReconciliationData] Failed to fetch:', err);
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, isAdmin, days, startDate, endDate, refetchTrigger]);
+
+  return { metrics, pricingConfigs, loading, error, refetch };
 }

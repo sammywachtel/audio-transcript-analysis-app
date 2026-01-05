@@ -750,12 +750,103 @@ Rolling windows are recalculated during the scheduled aggregation job.
 
 ### Admin Dashboard
 
-Four-tab interface for administrators:
+Five-tab interface for administrators:
 
 1. **Overview**: Global stats cards, time-series charts (jobs, costs, usage)
 2. **Users**: User list with drill-down to individual user metrics
-3. **Jobs**: Processing history table with expandable details
-4. **Pricing**: View/add LLM pricing configurations
+3. **Jobs**: Processing history table with expandable details and drill-down to job detail view
+4. **Chat**: Chat activity aggregated by conversation with pricing migration warnings
+5. **Pricing**: View/add LLM pricing configurations
+
+### Job Detail View
+
+Accessed via `/admin/jobs/:metricId` when clicking a job row in the Jobs tab. Shows comprehensive job-level observability:
+
+**Timing Breakdown:**
+- Visual progress bars showing relative time spent in each phase
+- Detailed millisecond-level timing for: download, WhisperX, segment building, Gemini analysis, speaker correction, transform, and Firestore write operations
+
+**LLM Usage:**
+- Per-call token counts for Gemini Analysis and Speaker Correction
+- WhisperX compute time with direct links to Replicate predictions for billing verification
+- Diarization compute time (if applicable)
+
+**Pricing Snapshot:**
+- Captured rates used at job execution time
+- Enables historical cost verification even after pricing changes
+
+**Cost Verification:**
+- "Estimated vs Current" comparison using `CostVerificationBadge`
+- Visual indicators: ✓ (green) for variance <1%, ⚠️ (yellow) for 1-5%, ❌ (red) for >5%
+- Hover tooltip shows detailed variance breakdown
+
+### Chat Metrics Tab
+
+Aggregates chat queries by conversation, showing:
+- Query count per conversation
+- Total tokens (input/output breakdown)
+- Average response time
+- Total cost per conversation
+- Last query timestamp
+
+**Pricing Migration Warning:**
+- Displayed when any chat metrics lack `pricingSnapshot` field
+- Indicates billing reconciliation is not yet available for those queries
+- Helps track rollout of pricing snapshot feature
+
+### Cost Reconciliation Report
+
+Accessible at `/admin/reports/cost-reconciliation`. Provides billing verification workflow:
+
+**Period Summaries:**
+- Weekly or monthly aggregation toggle
+- Per-service breakdown (Gemini, WhisperX, Chat)
+- Estimated vs recalculated cost comparison
+- Variance highlighting (rows >5% variance shown in red)
+- Status badges: ✓ Match, ⚠️ Minor, ❌ Significant
+
+**Pricing Change Log:**
+- All pricing configuration changes within the date range
+- Effective dates and rate details
+- Notes field for tracking why pricing changed
+
+**CSV Export:**
+- Finance-friendly export format
+- Columns: Period, Service, Jobs, Estimated Cost, Recalculated Cost, Variance, Variance %
+- Filename includes export date for tracking
+
+**Variance Thresholds:**
+- Match: <1% variance
+- Minor: 1-5% variance (yellow)
+- Significant: >5% variance (red)
+
+### Cost Verification Badge
+
+Reusable component that appears in:
+- MetricsTable expanded rows
+- Job Detail page cost comparison section
+
+**Functionality:**
+- Calls `recalculateCostWithCurrentPricing()` to compare stored cost against current pricing
+- Memoized to avoid redundant computation
+- Hover tooltip shows detailed breakdown: original cost, recalculated cost, variance amount and percentage
+- Falls back gracefully when pricing snapshot is missing (older docs)
+
+**Variance Calculation:**
+For processing metrics:
+```typescript
+// Recalculate using current pricing
+geminiCost = lookup(model).inputPrice * tokens...
+whisperxCost = lookup(model).pricePerSecond * seconds...
+variance = recalculatedCost - originalCost
+variancePercent = (variance / originalCost) * 100
+```
+
+For chat metrics:
+```typescript
+chatCost = lookup(model).inputPrice * inputTokens + lookup(model).outputPrice * outputTokens
+variance = recalculatedCost - originalCost
+```
 
 ### User Stats Page
 

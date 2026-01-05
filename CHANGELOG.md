@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Admin Cost Visibility Dashboard** - Comprehensive cost transparency tools for finance and operations
+  - Job Detail view at `/admin/jobs/:metricId` with timing breakdowns, token usage, pricing snapshots, and Replicate prediction links
+  - Chat metrics tab aggregating conversational queries by conversation with token usage and response time analytics
+  - Cost Reconciliation report at `/admin/reports/cost-reconciliation` with weekly/monthly summaries, variance detection (>5% highlighted), and CSV export
+  - Cost verification badges showing estimated vs. current pricing with ✓/⚠️/❌ status indicators
+
 ### Changed
 - **Vertex AI SDK Migration** - Replaced `@google/generative-ai` with `@google-cloud/vertexai` for billing label support
   - All 6 Gemini API calls now include billing labels (`conversation_id`, `user_id`, `call_type`, `environment`)
   - Enables cost tracking and reconciliation via GCP billing reports
   - Updated `transcribeWithWhisperX()` to return `predictionId` for all successful transcriptions
   - Authentication changed from API key to service account credentials
+
+### Fixed
+- Admin dashboard URL routing now properly handles `/admin`, `/admin/jobs/:id`, and `/admin/reports/cost-reconciliation` paths
+- Job detail views now correctly load metric data using Firestore document IDs
+- Cost Reconciliation report period dates now use local timezone instead of UTC to prevent off-by-one date errors
 
 ---
 
