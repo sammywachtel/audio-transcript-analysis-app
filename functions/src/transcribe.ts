@@ -12,7 +12,7 @@
 
 import { onObjectFinalized } from 'firebase-functions/v2/storage';
 import { defineSecret } from 'firebase-functions/params';
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import { VertexAI, SchemaType } from '@google-cloud/vertexai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
@@ -25,11 +25,27 @@ import {
 } from './metrics';
 import { recordUserEvent } from './userEvents';
 import { jsonrepair } from 'jsonrepair';
+import { buildGeminiLabels } from './utils/llmMetadata';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
-const geminiApiKey = defineSecret('GEMINI_API_KEY');
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For speaker diarization
+
+/**
+ * Create a Vertex AI client for Gemini API calls.
+ * Uses automatic project detection from Cloud Functions environment.
+ * Location defaults to us-central1 unless VERTEX_AI_LOCATION is set.
+ */
+function getVertexAIClient(): VertexAI {
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (!project) {
+    throw new Error('GCP project ID not found in environment');
+  }
+
+  const location = process.env.VERTEX_AI_LOCATION || 'us-central1';
+
+  return new VertexAI({ project, location });
+}
 
 /**
  * Custom error for abort requests - allows clean exit from processing
@@ -110,6 +126,7 @@ interface GeminiAnalysis {
 interface GeminiAnalysisResult {
   analysis: GeminiAnalysis;
   tokenUsage: GeminiUsage;
+  labels: Record<string, string>;  // Billing labels for this call
 }
 
 /**
@@ -118,6 +135,7 @@ interface GeminiAnalysisResult {
 interface SpeakerCorrectionResult {
   corrections: SpeakerCorrection[];
   tokenUsage: GeminiUsage;
+  labels: Record<string, string>;  // Billing labels for this call
 }
 
 interface Speaker {
@@ -296,6 +314,7 @@ interface GeminiPreAnalysisResult {
   hints: WhisperXHints;
   analysis: GeminiAnalysis;
   tokenUsage: GeminiUsage;
+  labels: Record<string, string>;  // Billing labels used for this call
 }
 
 /**
@@ -309,15 +328,16 @@ interface GeminiPreAnalysisResult {
  */
 async function preAnalyzeAudioWithGemini(
   audioBuffer: Buffer,
-  apiKey: string
+  conversationId: string,
+  userId: string
 ): Promise<GeminiPreAnalysisResult> {
   console.log('[Gemini Pre-Analysis] Starting audio analysis for speaker hints + content...');
   const startTime = Date.now();
 
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const vertexAI = getVertexAIClient();
 
   // Use gemini-2.5-flash for audio analysis
-  const model = genAI.getGenerativeModel({
+  const model = vertexAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
@@ -417,18 +437,28 @@ Important:
 
   console.log('[Gemini Pre-Analysis] Sending audio to Gemini...');
 
-  const result = await model.generateContent([
-    { text: prompt },
-    {
-      inlineData: {
-        mimeType,
-        data: audioBase64
+  // Build labels for billing attribution
+  const labels = buildGeminiLabels(conversationId, userId, 'pre_analysis');
+
+  const result = await model.generateContent({
+    contents: [
+      { role: 'user', parts: [{ text: prompt }] },
+      {
+        role: 'user',
+        parts: [{
+          inlineData: {
+            mimeType,
+            data: audioBase64
+          }
+        }]
       }
-    }
-  ]);
+    ],
+    labels
+  });
 
   const durationMs = Date.now() - startTime;
-  const responseText = result.response.text();
+  // Vertex AI SDK response structure
+  const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
   // Extract token usage
   const usageMetadata = result.response.usageMetadata;
@@ -502,7 +532,7 @@ Important:
     peopleCount: analysis.people.length
   });
 
-  return { hints, analysis, tokenUsage };
+  return { hints, analysis, tokenUsage, labels };
 }
 
 /**
@@ -512,15 +542,16 @@ Important:
  */
 async function transcribeWithGeminiFallback(
   audioBuffer: Buffer,
-  apiKey: string
+  conversationId: string,
+  userId: string
 ): Promise<{ segments: WhisperXSegment[]; status: 'success' | 'error'; error?: string; usedFallback?: boolean }> {
   console.log('[Gemini Fallback] Starting transcription...');
 
   try {
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const vertexAI = getVertexAIClient();
 
     // Use gemini-2.5-flash for transcription (supports audio)
-    const model = genAI.getGenerativeModel({
+    const model = vertexAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
@@ -574,18 +605,28 @@ Return as JSON with a "segments" array.
     console.log('[Gemini Fallback] Sending audio to Gemini...');
     const startTime = Date.now();
 
-    const result = await model.generateContent([
-      { text: prompt },
-      {
-        inlineData: {
-          mimeType,
-          data: audioBase64
+    // Build labels for billing attribution
+    const labels = buildGeminiLabels(conversationId, userId, 'fallback_transcription');
+
+    const result = await model.generateContent({
+      contents: [
+        { role: 'user', parts: [{ text: prompt }] },
+        {
+          role: 'user',
+          parts: [{
+            inlineData: {
+              mimeType,
+              data: audioBase64
+            }
+          }]
         }
-      }
-    ]);
+      ],
+      labels
+    });
 
     const durationMs = Date.now() - startTime;
-    const responseText = result.response.text();
+    // Vertex AI SDK response structure
+    const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     console.log(`[Gemini Fallback] Response received in ${(durationMs / 1000).toFixed(1)}s`);
 
@@ -634,7 +675,7 @@ Return as JSON with a "segments" array.
  */
 export const transcribeAudio = onObjectFinalized(
   {
-    secrets: [geminiApiKey, replicateApiToken, huggingfaceAccessToken],
+    secrets: [replicateApiToken, huggingfaceAccessToken],
     memory: '1GiB', // Audio processing needs more memory
     timeoutSeconds: 540, // 9 minutes (max for 1st gen functions)
     region: 'us-central1'
@@ -706,6 +747,7 @@ export const transcribeAudio = onObjectFinalized(
         whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const },
         diarization: { predictionId: '', computeTimeSeconds: 0, model: 'pyannote-diarization' as const }
       },
+      geminiLabels: [] as Record<string, string>[],  // Collect labels from each Gemini call
       segmentCount: 0,
       speakerCount: 0,
       termCount: 0,
@@ -761,7 +803,8 @@ export const transcribeAudio = onObjectFinalized(
       try {
         preAnalysisResult = await preAnalyzeAudioWithGemini(
           audioBuffer,
-          geminiApiKey.value()
+          conversationId,
+          userId
         );
 
         // Convert to WhisperX hints format
@@ -775,6 +818,9 @@ export const transcribeAudio = onObjectFinalized(
           speakerNames: whisperxHints.speakerNames,
           durationMs: Date.now() - preAnalysisStartTime
         });
+
+        // Collect labels for billing reconciliation
+        partialMetrics.geminiLabels.push(preAnalysisResult.labels);
       } catch (error) {
         // Pre-analysis is optional - continue without hints if it fails
         console.warn('[Transcribe] Pre-analysis failed, continuing without hints:', error);
@@ -824,7 +870,8 @@ export const transcribeAudio = onObjectFinalized(
 
         const geminiTranscriptResult = await transcribeWithGeminiFallback(
           audioBuffer,
-          geminiApiKey.value()
+          conversationId,
+          userId
         );
 
         if (geminiTranscriptResult.status === 'error') {
@@ -853,11 +900,28 @@ export const transcribeAudio = onObjectFinalized(
 
       // Update partial metrics after WhisperX (most expensive step)
       partialMetrics.timingMs.whisperx = whisperxDurationMs;
-      // Estimate compute time from wall-clock time (GPU runs in real-time for transcription)
-      // This is approximate but captures the relative cost for abort scenarios
-      const estimatedComputeSeconds = whisperxDurationMs / 1000;
-      partialMetrics.llmUsage.whisperx.computeTimeSeconds = estimatedComputeSeconds;
-      partialMetrics.llmUsage.diarization.computeTimeSeconds = estimatedComputeSeconds * 0.3; // ~30% is diarization
+
+      // Use actual GPU compute time from Replicate metrics if available
+      // Falls back to wall-clock estimate if metrics not available
+      const actualComputeSeconds = whisperxResult.actualComputeSeconds;
+      const computeSeconds = actualComputeSeconds ?? (whisperxDurationMs / 1000);
+
+      if (actualComputeSeconds) {
+        console.log(`[Transcribe] Using actual Replicate compute time: ${actualComputeSeconds}s (wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s)`);
+      } else {
+        console.warn(`[Transcribe] Replicate metrics unavailable, estimating compute time from wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s`);
+      }
+
+      partialMetrics.llmUsage.whisperx.computeTimeSeconds = computeSeconds;
+      partialMetrics.llmUsage.diarization.computeTimeSeconds = computeSeconds * 0.3; // ~30% is diarization
+
+      // Capture prediction ID for billing traceability (from robust method - standard method doesn't expose it)
+      const whisperxPredictionId = whisperxResult.predictionId;
+      if (whisperxPredictionId) {
+        partialMetrics.llmUsage.whisperx.predictionId = whisperxPredictionId;
+        // Diarization runs as part of the same prediction
+        partialMetrics.llmUsage.diarization.predictionId = whisperxPredictionId;
+      }
 
       // Check for abort after WhisperX (most expensive step)
       await checkAbort(conversationId);
@@ -919,10 +983,14 @@ export const transcribeAudio = onObjectFinalized(
         const analysisResult = await analyzeTranscriptWithGemini(
           whisperxSegments.segments,
           whisperxSegments.speakers,
-          geminiApiKey.value()
+          conversationId,
+          userId
         );
         analysis = analysisResult.analysis;
         geminiAnalysisTokens = analysisResult.tokenUsage;
+
+        // Collect labels for billing reconciliation
+        partialMetrics.geminiLabels.push(analysisResult.labels);
 
         geminiDurationMs = Date.now() - geminiStartTime;
         console.log('[Transcribe] Gemini analysis complete:', {
@@ -962,8 +1030,12 @@ export const transcribeAudio = onObjectFinalized(
       const speakerIdentificationResult = await identifySpeakersFromContent(
         whisperxSegments.segments,
         whisperxSegments.speakers,
-        geminiApiKey.value()
+        conversationId,
+        userId
       );
+
+      // Collect labels for billing reconciliation
+      partialMetrics.geminiLabels.push(speakerIdentificationResult.labels);
 
       const speakerIdDurationMs = Date.now() - speakerIdStartTime;
       console.log('[Transcribe] Content-based speaker identification complete:', {
@@ -996,9 +1068,13 @@ export const transcribeAudio = onObjectFinalized(
       const correctionResult = await identifySpeakerReassignments(
         whisperxSegments.segments,
         whisperxSegments.speakers,
-        geminiApiKey.value()
+        conversationId,
+        userId
       );
       const { corrections: speakerCorrections, tokenUsage: geminiCorrectionTokens } = correctionResult;
+
+      // Collect labels for billing reconciliation
+      partialMetrics.geminiLabels.push(correctionResult.labels);
 
       const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
       console.log('[Transcribe] Speaker reassignment analysis complete:', {
@@ -1104,23 +1180,30 @@ export const transcribeAudio = onObjectFinalized(
           // Use wall clock time as approximation for Replicate compute time
           // (actual billing uses their internal compute time which is close)
           computeTimeSeconds: whisperxDurationMs / 1000,
-          model: 'whisperx'
+          model: 'whisperx',
+          // Prediction ID from robust method (for billing traceability)
+          predictionId: whisperxPredictionId
         }
         // diarization is built into whisperx model now, no separate call
       };
 
       // Calculate estimated costs based on pricing from database
-      const estimatedCost = await calculateCost(llmUsage);
+      // Returns both cost breakdown and pricing snapshot for audit trail
+      const costResult = await calculateCost(llmUsage);
 
       console.log('[Transcribe] LLM usage and cost breakdown:', {
         conversationId,
         geminiAnalysisTokens: geminiAnalysisTokens.inputTokens + geminiAnalysisTokens.outputTokens,
         geminiCorrectionTokens: geminiCorrectionTokens.inputTokens + geminiCorrectionTokens.outputTokens,
         whisperxComputeSec: llmUsage.whisperx.computeTimeSeconds.toFixed(1),
-        estimatedCostUsd: estimatedCost.totalUsd.toFixed(6)
+        estimatedCostUsd: costResult.estimatedCost.totalUsd.toFixed(6),
+        pricingSnapshot: {
+          geminiPricingId: costResult.pricingSnapshot.geminiPricingId,
+          whisperxPricingId: costResult.pricingSnapshot.whisperxPricingId
+        }
       });
 
-      // Record metrics for observability dashboard
+      // Record metrics for observability dashboard (includes pricing snapshot for billing reconciliation)
       await recordMetrics({
         conversationId,
         userId,
@@ -1145,7 +1228,9 @@ export const transcribeAudio = onObjectFinalized(
         audioSizeMB: audioBuffer.length / (1024 * 1024),
         durationMs: processedData.durationMs,
         llmUsage,
-        estimatedCost
+        geminiLabels: partialMetrics.geminiLabels,  // Billing labels for cost attribution
+        estimatedCost: costResult.estimatedCost,
+        pricingSnapshot: costResult.pricingSnapshot
       });
 
       // Record processing_completed event for user stats
@@ -1155,7 +1240,7 @@ export const transcribeAudio = onObjectFinalized(
         conversationId,
         metadata: {
           durationMs: processedData.durationMs,
-          estimatedCostUsd: estimatedCost.totalUsd,
+          estimatedCostUsd: costResult.estimatedCost.totalUsd,
           segmentCount: processedData.segments.length
         }
       });
@@ -1175,14 +1260,14 @@ export const transcribeAudio = onObjectFinalized(
         partialMetrics.timingMs.total = Date.now() - partialMetrics.processStartTime;
 
         // Calculate estimated cost from whatever LLM resources were consumed
-        const partialCost = await calculateCost(partialMetrics.llmUsage);
+        const partialCostResult = await calculateCost(partialMetrics.llmUsage);
 
         console.log('[Transcribe] Recording partial metrics on abort:', {
           conversationId,
           elapsedMs: partialMetrics.timingMs.total,
           whisperxTime: partialMetrics.llmUsage.whisperx.computeTimeSeconds,
           geminiInputTokens: partialMetrics.llmUsage.geminiAnalysis.inputTokens,
-          estimatedCostUsd: partialCost.totalUsd
+          estimatedCostUsd: partialCostResult.estimatedCost.totalUsd
         });
 
         // Record metrics for observability - aborted jobs still cost money!
@@ -1201,7 +1286,9 @@ export const transcribeAudio = onObjectFinalized(
           audioSizeMB: partialMetrics.audioSizeMB,
           durationMs: partialMetrics.durationMs,
           llmUsage: partialMetrics.llmUsage,
-          estimatedCost: partialCost
+          geminiLabels: partialMetrics.geminiLabels,  // Billing labels for cost attribution
+          estimatedCost: partialCostResult.estimatedCost,
+          pricingSnapshot: partialCostResult.pricingSnapshot
         });
 
         // Record processing_aborted event for user stats
@@ -1210,7 +1297,7 @@ export const transcribeAudio = onObjectFinalized(
           userId,
           conversationId,
           metadata: {
-            estimatedCostUsd: partialCost.totalUsd,
+            estimatedCostUsd: partialCostResult.estimatedCost.totalUsd,
             elapsedMs: partialMetrics.timingMs.total
           }
         });
@@ -1764,12 +1851,13 @@ function fixSegmentBoundaries(
 async function analyzeTranscriptWithGemini(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   speakers: Array<{ id: string; name: string }>,
-  apiKey: string
+  conversationId: string,
+  userId: string
 ): Promise<GeminiAnalysisResult> {
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const vertexAI = getVertexAIClient();
 
   // Use gemini-2.5-flash for analysis
-  const model = genAI.getGenerativeModel({
+  const model = vertexAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
@@ -1882,8 +1970,15 @@ Return your analysis as JSON matching the provided schema.
     speakerCount: speakers.length
   });
 
-  const result = await model.generateContent([{ text: prompt }]);
-  const responseText = result.response.text();
+  // Build labels for billing attribution
+  const labels = buildGeminiLabels(conversationId, userId, 'analysis');
+
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    labels
+  });
+  // Vertex AI SDK response structure
+  const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
   // Extract token usage for cost tracking
   const usageMetadata = result.response.usageMetadata;
@@ -1903,7 +1998,8 @@ Return your analysis as JSON matching the provided schema.
   const parsed = robustJsonParse<GeminiAnalysis>(responseText, 'Gemini Analysis');
   return {
     analysis: parsed,
-    tokenUsage
+    tokenUsage,
+    labels
   };
 }
 
@@ -1925,12 +2021,13 @@ Return your analysis as JSON matching the provided schema.
 async function identifySpeakersFromContent(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   speakers: Array<{ id: string; name: string }>,
-  apiKey: string
-): Promise<{ speakerNotes: GeminiAnalysis['speakerNotes']; tokenUsage: GeminiUsage }> {
-  const genAI = new GoogleGenerativeAI(apiKey);
+  conversationId: string,
+  userId: string
+): Promise<{ speakerNotes: GeminiAnalysis['speakerNotes']; tokenUsage: GeminiUsage; labels: Record<string, string> }> {
+  const vertexAI = getVertexAIClient();
 
   // Use gemini-2.5-flash for speaker identification
-  const model = genAI.getGenerativeModel({
+  const model = vertexAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
@@ -2014,8 +2111,15 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
     speakerDistribution
   });
 
-  const result = await model.generateContent([{ text: prompt }]);
-  const responseText = result.response.text();
+  // Build labels for billing attribution
+  const labels = buildGeminiLabels(conversationId, userId, 'speaker_identification');
+
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    labels
+  });
+  // Vertex AI SDK response structure
+  const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
   // Extract token usage for cost tracking
   const usageMetadata = result.response.usageMetadata;
@@ -2045,7 +2149,8 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
 
     return {
       speakerNotes: parsed.speakerNotes,
-      tokenUsage
+      tokenUsage,
+      labels
     };
   } catch (parseError) {
     console.error('[Speaker Identification] JSON parse failed even after repair:', {
@@ -2054,7 +2159,8 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
     // Return empty speaker notes on parse failure - will fall back to pre-analysis
     return {
       speakerNotes: [],
-      tokenUsage
+      tokenUsage,
+      labels
     };
   }
 }
@@ -2068,13 +2174,14 @@ Each entry needs: speakerId (SPEAKER_XX), inferredName (only if confident), role
 async function identifySpeakerReassignments(
   segments: Array<{ text: string; startMs: number; endMs: number; speakerId: string; index: number }>,
   speakers: Array<{ id: string; name: string }>,
-  apiKey: string
+  conversationId: string,
+  userId: string
 ): Promise<SpeakerCorrectionResult> {
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const vertexAI = getVertexAIClient();
 
   // Use gemini-2.5-flash for speaker reassignment analysis
   // Schema simplified to only support reassign (no split)
-  const model = genAI.getGenerativeModel({
+  const model = vertexAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
@@ -2167,8 +2274,15 @@ If no corrections are needed, return an empty array.
     speakerDistribution
   });
 
-  const result = await model.generateContent([{ text: prompt }]);
-  const responseText = result.response.text();
+  // Build labels for billing attribution
+  const labels = buildGeminiLabels(conversationId, userId, 'speaker_correction');
+
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    labels
+  });
+  // Vertex AI SDK response structure
+  const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
   // Extract token usage for cost tracking
   const usageMetadata = result.response.usageMetadata;
@@ -2204,7 +2318,8 @@ If no corrections are needed, return an empty array.
 
     return {
       corrections,
-      tokenUsage
+      tokenUsage,
+      labels
     };
   } catch (parseError) {
     console.error('[Speaker Reassignment] JSON parse failed even after repair:', {
@@ -2214,7 +2329,8 @@ If no corrections are needed, return an empty array.
     // Still return token usage even on parse failure (Gemini was still called)
     return {
       corrections: [],
-      tokenUsage
+      tokenUsage,
+      labels
     };
   }
 }

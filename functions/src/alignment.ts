@@ -1457,6 +1457,10 @@ export interface WhisperXResult {
   segments: WhisperXSegment[];
   status: 'success' | 'error';
   error?: string;
+  /** Replicate prediction ID for cost traceability */
+  predictionId?: string;
+  /** Actual GPU compute time in seconds (from Replicate metrics.predict_time) */
+  actualComputeSeconds?: number;
 }
 
 /**
@@ -1536,10 +1540,50 @@ export async function transcribeWithWhisperX(
     });
 
     const startTime = Date.now();
-    const output = await client.run(
-      WHISPERX_MODEL as `${string}/${string}:${string}`,
-      { input: inputParams }
-    );
+
+    // Use predictions API instead of run() to get predictionId for cost tracking
+    const prediction = await client.predictions.create({
+      model: WHISPERX_MODEL.split(':')[0] as `${string}/${string}`,
+      version: WHISPERX_MODEL.split(':')[1],
+      input: inputParams
+    });
+
+    console.log(`[WhisperX] Prediction created: ${prediction.id}`);
+
+    // Poll for completion
+    const maxWaitMs = 8 * 60 * 1000; // 8 minutes max
+    const pollIntervalMs = 5000; // Poll every 5 seconds
+    let elapsedMs = 0;
+
+    let output: unknown;
+    let actualComputeSeconds: number | undefined;
+    while (elapsedMs < maxWaitMs) {
+      const status = await client.predictions.get(prediction.id);
+
+      if (status.status === 'succeeded') {
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        // Extract actual GPU compute time from Replicate metrics
+        actualComputeSeconds = (status as any).metrics?.predict_time;
+        console.log(`[WhisperX] Prediction succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${prediction.id})`);
+        output = status.output;
+        break;
+      } else if (status.status === 'failed' || status.status === 'canceled') {
+        throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);
+      }
+
+      // Still processing, wait and poll again
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      elapsedMs += pollIntervalMs;
+
+      if (elapsedMs % 30000 === 0) { // Log every 30 seconds
+        console.log(`[WhisperX] Still waiting... (${elapsedMs / 1000}s elapsed)`);
+      }
+    }
+
+    if (!output) {
+      throw new Error(`Prediction timed out after ${maxWaitMs / 1000}s`);
+    }
+
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[WhisperX] API call completed in ${duration}s`);
 
@@ -1628,7 +1672,9 @@ export async function transcribeWithWhisperX(
 
     return {
       segments,
-      status: 'success'
+      status: 'success',
+      predictionId: prediction.id,
+      actualComputeSeconds
     };
 
   } catch (error) {
@@ -1732,7 +1778,9 @@ export async function transcribeWithWhisperXRobust(
 
         if (status.status === 'succeeded') {
           const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-          console.log(`[WhisperX-Robust] Prediction succeeded in ${duration}s`);
+          // Extract actual GPU compute time from Replicate metrics
+          const actualComputeSeconds = (status as any).metrics?.predict_time;
+          console.log(`[WhisperX-Robust] Prediction succeeded in ${duration}s wall-clock (${actualComputeSeconds || 'unknown'}s compute, id: ${prediction.id})`);
 
           // Parse output
           const segments = parseWhisperXOutput(status.output);
@@ -1741,7 +1789,8 @@ export async function transcribeWithWhisperXRobust(
             throw new Error('WhisperX returned no segments');
           }
 
-          return { segments, status: 'success' };
+          // Return with prediction ID and actual compute time for cost traceability
+          return { segments, status: 'success', predictionId: prediction.id, actualComputeSeconds };
 
         } else if (status.status === 'failed' || status.status === 'canceled') {
           throw new Error(`Prediction ${status.status}: ${status.error || 'Unknown error'}`);

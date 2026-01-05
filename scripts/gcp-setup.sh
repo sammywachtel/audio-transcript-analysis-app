@@ -275,8 +275,9 @@ APIS=(
     # Storage & Billing
     "storage.googleapis.com"
     "cloudbilling.googleapis.com"
-    # AI/ML - Gemini
+    # AI/ML - Gemini & Vertex AI
     "generativelanguage.googleapis.com"
+    "aiplatform.googleapis.com"  # Required for Vertex AI SDK (Gemini with billing labels)
     "apikeys.googleapis.com"
 )
 
@@ -376,9 +377,10 @@ RUNTIME_SA="${PROJECT_ID}@appspot.gserviceaccount.com"
 # Check if App Engine default SA exists (created when enabling certain APIs)
 if ! sa_exists "$RUNTIME_SA"; then
     log_info "App Engine default SA not yet created - will be created on first function deploy"
-    log_info "Skipping secret accessor binding (will be configured during deployment)"
+    log_info "Skipping runtime bindings (will be configured during deployment)"
 else
     add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/secretmanager.secretAccessor" "$RUNTIME_SA → Secret Accessor"
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/aiplatform.user" "$RUNTIME_SA → Vertex AI User"
 fi
 
 # -----------------------------------------------------------------------------

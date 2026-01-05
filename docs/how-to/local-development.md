@@ -207,6 +207,7 @@ npm run preview
 | `npm test` | Run tests in watch mode |
 | `npm run test:run` | Run tests once |
 | `npm run lint` | Run ESLint |
+| `npm run db:debug` | Query Firestore emulator (see [guide](./query-firestore-emulator.md)) |
 | `npx firebase deploy` | Deploy to Firebase |
 
 ## Debugging
@@ -247,6 +248,23 @@ When running emulators, open http://localhost:4000 for:
 - Storage browser
 - Function logs
 - Auth user management
+
+### Querying Firestore Emulator (Command Line)
+
+For scriptable queries and data extraction:
+
+```bash
+# List all documents in a collection
+npm run db:debug list _metrics
+
+# Get a specific document
+npm run db:debug get _metrics vsux1xi7PALTwxjdP2K0
+
+# Save to file
+npm run db:debug get conversations c_123 > snapshot.json
+```
+
+See [How to Query the Firestore Emulator](./query-firestore-emulator.md) for complete details.
 
 ### Cloud Function Logs
 
