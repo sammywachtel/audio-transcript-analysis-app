@@ -1,11 +1,9 @@
 import React, { useEffect } from 'react';
 import { X, Trash2, AlertTriangle } from 'lucide-react';
 import { Button } from '../Button';
-import { CostIndicator } from './CostIndicator';
 
 interface DeleteConfirmModalProps {
   conversationTitle: string;
-  estimatedCost?: number;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -13,12 +11,11 @@ interface DeleteConfirmModalProps {
 /**
  * DeleteConfirmModal - Branded confirmation for deleting conversations
  *
- * Shows conversation context, estimated cost, and permanent deletion warning.
+ * Shows conversation context and permanent deletion warning.
  * Supports keyboard shortcuts: Enter to confirm, Escape to cancel.
  */
 export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
   conversationTitle,
-  estimatedCost,
   onConfirm,
   onCancel
 }) => {
@@ -77,13 +74,6 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
             <p className="text-sm font-medium text-slate-900 mb-1">Conversation:</p>
             <p className="text-sm text-slate-600 truncate">{conversationTitle}</p>
           </div>
-
-          {estimatedCost !== undefined && estimatedCost > 0 && (
-            <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-              <p className="text-sm font-medium text-slate-900 mb-2">Processing Cost:</p>
-              <CostIndicator cost={estimatedCost} size="md" showBreakdown={false} />
-            </div>
-          )}
 
           <div className="bg-red-50 border border-red-200 rounded-lg p-3">
             <div className="flex items-start gap-2">

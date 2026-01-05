@@ -150,7 +150,7 @@ function AppContent() {
   }
 
   if (currentView === 'stats') {
-    return <UserStats onBack={handleStatsBack} />;
+    return <UserStats onBack={handleStatsBack} onAdminClick={handleAdminClick} />;
   }
 
   if (currentView === 'search') {

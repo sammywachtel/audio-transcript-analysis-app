@@ -90,9 +90,9 @@ export const AbortConfirmModal: React.FC<AbortConfirmModalProps> = ({
 
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
             <p className="text-sm text-amber-800">
-              <span className="font-medium">Warning:</span> Processing costs may still be incurred
-              for work completed so far. The conversation will be marked as cancelled and removed
-              from your library.
+              <span className="font-medium">Warning:</span> Any work completed so far may still
+              contribute to usage costs. View your stats page for cost details. The conversation
+              will be marked as cancelled and removed from your library.
             </p>
           </div>
         </div>

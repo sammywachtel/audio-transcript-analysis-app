@@ -582,6 +582,65 @@ export async function getChatMetrics(options?: {
 export type VarianceStatus = 'match' | 'minor' | 'significant';
 
 /**
+ * Pricing accuracy information for user display
+ */
+export interface PricingAccuracyInfo {
+  status: VarianceStatus;
+  capturedAt: Date | null;
+  label: string;
+  hasSnapshot: boolean;
+}
+
+/**
+ * Get pricing accuracy status from recent metrics
+ *
+ * Finds the most recent metric with a pricing snapshot and calculates variance.
+ * Used for the My Stats pricing accuracy indicator.
+ */
+export async function getPricingAccuracyStatus(
+  metrics: ProcessingMetric[]
+): Promise<PricingAccuracyInfo> {
+  // Find most recent metric with a pricing snapshot
+  const metricWithSnapshot = metrics.find(m => m.pricingSnapshot);
+
+  if (!metricWithSnapshot || !metricWithSnapshot.pricingSnapshot) {
+    return {
+      status: 'match',
+      capturedAt: null,
+      label: 'No pricing data available',
+      hasSnapshot: false
+    };
+  }
+
+  // Recalculate using current pricing
+  const verification = await recalculateCostWithCurrentPricing(metricWithSnapshot);
+
+  // If no current pricing is configured, we can't actually verify accuracy
+  if (!verification.foundCurrentPricing) {
+    return {
+      status: 'minor',  // Use 'minor' (yellow) to indicate caution
+      capturedAt: metricWithSnapshot.pricingSnapshot.capturedAt.toDate(),
+      label: 'No pricing configured — unable to verify',
+      hasSnapshot: true
+    };
+  }
+
+  // Generate user-friendly label
+  const labels: Record<VarianceStatus, string> = {
+    match: 'Pricing matches current rates',
+    minor: 'Minor pricing variance (<5%)',
+    significant: 'Significant pricing variance (>5%)'
+  };
+
+  return {
+    status: verification.status,
+    capturedAt: metricWithSnapshot.pricingSnapshot.capturedAt.toDate(),
+    label: labels[verification.status],
+    hasSnapshot: true
+  };
+}
+
+/**
  * Recalculate cost using current pricing vs stored snapshot
  */
 export async function recalculateCostWithCurrentPricing(
@@ -592,6 +651,7 @@ export async function recalculateCostWithCurrentPricing(
   variance: number;
   variancePercent: number;
   status: VarianceStatus;
+  foundCurrentPricing: boolean;  // True if we found any current pricing to compare against
 }> {
   try {
     // Determine original cost
@@ -609,9 +669,13 @@ export async function recalculateCostWithCurrentPricing(
         recalculatedUsd: originalUsd,
         variance: 0,
         variancePercent: 0,
-        status: 'match'
+        status: 'match',
+        foundCurrentPricing: false
       };
     }
+
+    // Track whether we found any current pricing configs
+    let foundAnyPricing = false;
 
     // Recalculate based on metric type
     let recalculatedUsd = 0;
@@ -622,6 +686,7 @@ export async function recalculateCostWithCurrentPricing(
       const currentPricing = await getCurrentPricing(chatMetric.tokenUsage.model);
 
       if (currentPricing) {
+        foundAnyPricing = true;
         const inputCost = (chatMetric.tokenUsage.inputTokens / 1_000_000) *
           (currentPricing.inputPricePerMillion || 0);
         const outputCost = (chatMetric.tokenUsage.outputTokens / 1_000_000) *
@@ -641,7 +706,8 @@ export async function recalculateCostWithCurrentPricing(
           recalculatedUsd: originalUsd,
           variance: 0,
           variancePercent: 0,
-          status: 'match'
+          status: 'match',
+          foundCurrentPricing: false
         };
       }
 
@@ -650,6 +716,7 @@ export async function recalculateCostWithCurrentPricing(
       let geminiUsd = 0;
 
       if (geminiAnalysisPricing) {
+        foundAnyPricing = true;
         const inputCost = (processingMetric.llmUsage.geminiAnalysis.inputTokens / 1_000_000) *
           (geminiAnalysisPricing.inputPricePerMillion || 0);
         const outputCost = (processingMetric.llmUsage.geminiAnalysis.outputTokens / 1_000_000) *
@@ -661,6 +728,7 @@ export async function recalculateCostWithCurrentPricing(
       if (processingMetric.llmUsage.geminiSpeakerCorrection) {
         const speakerPricing = await getCurrentPricing(processingMetric.llmUsage.geminiSpeakerCorrection.model);
         if (speakerPricing) {
+          foundAnyPricing = true;
           const inputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.inputTokens / 1_000_000) *
             (speakerPricing.inputPricePerMillion || 0);
           const outputCost = (processingMetric.llmUsage.geminiSpeakerCorrection.outputTokens / 1_000_000) *
@@ -674,6 +742,7 @@ export async function recalculateCostWithCurrentPricing(
       if (processingMetric.llmUsage.whisperx) {
         const whisperxPricing = await getCurrentPricing(processingMetric.llmUsage.whisperx.model);
         if (whisperxPricing && whisperxPricing.pricePerSecond) {
+          foundAnyPricing = true;
           whisperxUsd = processingMetric.llmUsage.whisperx.computeTimeSeconds * whisperxPricing.pricePerSecond;
         }
       }
@@ -683,6 +752,7 @@ export async function recalculateCostWithCurrentPricing(
       if (processingMetric.llmUsage.diarization) {
         const diarizationPricing = await getCurrentPricing(processingMetric.llmUsage.diarization.model);
         if (diarizationPricing && diarizationPricing.pricePerSecond) {
+          foundAnyPricing = true;
           diarizationUsd = processingMetric.llmUsage.diarization.computeTimeSeconds * diarizationPricing.pricePerSecond;
         }
       }
@@ -707,7 +777,8 @@ export async function recalculateCostWithCurrentPricing(
       recalculatedUsd,
       variance,
       variancePercent,
-      status
+      status,
+      foundCurrentPricing: foundAnyPricing
     };
   } catch (error) {
     console.error('[MetricsService] Failed to recalculate cost:', error);
@@ -721,7 +792,8 @@ export async function recalculateCostWithCurrentPricing(
       recalculatedUsd: originalUsd,
       variance: 0,
       variancePercent: 0,
-      status: 'match'
+      status: 'match',
+      foundCurrentPricing: false
     };
   }
 }
