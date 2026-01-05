@@ -304,7 +304,6 @@ export const Library: React.FC<LibraryProps> = ({ onOpen, onAdminClick, onStatsC
       {deleteConfirmConv && (
         <DeleteConfirmModal
           conversationTitle={deleteConfirmConv.title}
-          estimatedCost={deleteConfirmConv.processingProgress?.percentComplete === 100 ? 0.15 : undefined}
           onConfirm={confirmDelete}
           onCancel={() => setDeleteConfirmConv(null)}
         />

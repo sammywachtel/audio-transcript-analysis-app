@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0-beta] - 2026-01-05
+
 ### Added
 - **Admin Cost Visibility Dashboard** - Comprehensive cost transparency tools for finance and operations
   - Job Detail view at `/admin/jobs/:metricId` with timing breakdowns, token usage, pricing snapshots, and Replicate prediction links
   - Chat metrics tab aggregating conversational queries by conversation with token usage and response time analytics
   - Cost Reconciliation report at `/admin/reports/cost-reconciliation` with weekly/monthly summaries, variance detection (>5% highlighted), and CSV export
   - Cost verification badges showing estimated vs. current pricing with ✓/⚠️/❌ status indicators
+- **User Cost Visibility** - Pricing accuracy indicator on My Stats page
+  - Shows whether stored costs match current configured rates (✓ match / ⚠️ minor / ❌ significant variance)
+  - Displays timestamp when rates were captured
+  - Includes disclaimer about configured vs actual billing rates
+  - Admin users see "View cost breakdown" link to admin dashboard
 
 ### Changed
 - **Vertex AI SDK Migration** - Replaced `@google/generative-ai` with `@google-cloud/vertexai` for billing label support
@@ -20,11 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables cost tracking and reconciliation via GCP billing reports
   - Updated `transcribeWithWhisperX()` to return `predictionId` for all successful transcriptions
   - Authentication changed from API key to service account credentials
+- **Cost Display Centralization** - Removed inline cost estimates from modals
+  - Delete and abort confirmation modals no longer show dollar amounts
+  - Users directed to My Stats page for accurate cost information
+  - Prevents displaying ad-hoc cost guesses during active processing
 
 ### Fixed
 - Admin dashboard URL routing now properly handles `/admin`, `/admin/jobs/:id`, and `/admin/reports/cost-reconciliation` paths
 - Job detail views now correctly load metric data using Firestore document IDs
 - Cost Reconciliation report period dates now use local timezone instead of UTC to prevent off-by-one date errors
+- Pricing accuracy indicator now correctly shows "No pricing configured" when `_pricing` collection is empty (previously showed false "match" status)
 
 ---
 

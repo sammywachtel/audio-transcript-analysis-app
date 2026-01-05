@@ -855,6 +855,18 @@ Personal usage statistics for all users:
 - 7-day and 30-day rolling windows
 - Recent processing jobs table
 
+**Pricing Accuracy Indicator:**
+- Shows comparison of stored pricing snapshot vs current pricing configuration
+- Visual badge: ✓ Match (<1%), ⚠️ Minor (1-5%), ❌ Significant (>5%)
+- Displays timestamp when rates were captured
+- Includes disclaimer about configured vs actual billing rates
+- Admin users see link to detailed cost breakdown in admin dashboard
+
+**Cost Display Centralization:**
+- Inline cost indicators removed from upload/delete/abort modals
+- Cost details consolidated in My Stats page for accuracy
+- Prevents displaying ad-hoc cost guesses during active processing
+
 Access: All authenticated users can view their own stats via "My Stats" in Library header.
 
 ### Scheduled Aggregation

@@ -21,13 +21,15 @@ import {
   MetricsTableSkeleton
 } from '../components/metrics';
 import { CostIndicator } from '../components/shared/CostIndicator';
+import { PricingAccuracyIndicator } from '../components/shared/PricingAccuracyIndicator';
 
 interface UserStatsProps {
   onBack: () => void;
+  onAdminClick?: () => void;
 }
 
-export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
-  const { user } = useAuth();
+export const UserStats: React.FC<UserStatsProps> = ({ onBack, onAdminClick }) => {
+  const { user, isAdmin } = useAuth();
   const { data: stats, loading: statsLoading, error: statsError } = useMyStats();
   // Always pass user ID - even for admins, "My Usage Stats" shows their own stats
   const { data: recentMetrics, loading: metricsLoading } = useRecentMetrics({
@@ -65,6 +67,13 @@ export const UserStats: React.FC<UserStatsProps> = ({ onBack }) => {
 
         {!statsError && (
           <div className="space-y-8">
+            {/* Pricing Accuracy Indicator */}
+            <PricingAccuracyIndicator
+              metrics={recentMetrics}
+              isAdmin={isAdmin}
+              onAdminClick={onAdminClick}
+            />
+
             {/* Lifetime Stats */}
             <section>
               <h2 className="text-lg font-semibold text-slate-900 mb-4">Lifetime Totals</h2>
