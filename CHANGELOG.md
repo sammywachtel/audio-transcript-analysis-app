@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Cancel Processing Now Works Immediately** - Cancel button stops processing without waiting
+  - Real-time Firestore listener detects abort flag instantly (no more checkpoint-only detection)
+  - Long-running Gemini and WhisperX calls abort immediately via `Promise.race()`
+  - Resources consumed before cancel are still tracked in metrics
+
 - **Large File Upload Timeouts** - Audio files up to 50MB now process reliably
   - Node.js undici `headersTimeout` extended to 15 minutes (fixes root cause of `HeadersTimeoutError`)
   - Gemini API calls configured with 10-minute SDK-level timeout as additional safeguard

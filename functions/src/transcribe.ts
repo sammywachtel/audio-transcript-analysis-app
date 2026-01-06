@@ -69,8 +69,97 @@ class AbortRequestedError extends Error {
 }
 
 /**
+ * AbortManager - Real-time abort detection using Firestore listener
+ *
+ * The old approach only checked for abort at specific checkpoints between
+ * operations. If a 20-minute Gemini call was running, cancel did nothing.
+ *
+ * This manager sets up a real-time Firestore listener that immediately
+ * detects when abortRequested becomes true, then rejects any pending
+ * operation via Promise.race().
+ */
+class AbortManager {
+  private conversationId: string;
+  private abortPromise: Promise<never>;
+  private unsubscribe: (() => void) | null = null;
+  private isAborted = false;
+
+  constructor(conversationId: string) {
+    this.conversationId = conversationId;
+    this.abortPromise = this.setupListener();
+  }
+
+  /**
+   * Set up a Firestore real-time listener that rejects when abort is requested.
+   * The promise never resolves - it only rejects on abort.
+   */
+  private setupListener(): Promise<never> {
+    return new Promise<never>((_, reject) => {
+      const docRef = db.collection('conversations').doc(this.conversationId);
+
+      this.unsubscribe = docRef.onSnapshot(
+        (snapshot) => {
+          if (snapshot.exists && snapshot.data()?.abortRequested === true) {
+            console.log('[AbortManager] Abort detected via real-time listener:', {
+              conversationId: this.conversationId
+            });
+            this.isAborted = true;
+            reject(new AbortRequestedError(this.conversationId));
+          }
+        },
+        (error) => {
+          // Listener errors shouldn't abort processing - just log them
+          console.warn('[AbortManager] Firestore listener error (non-fatal):', error);
+        }
+      );
+    });
+  }
+
+  /**
+   * Race any operation against the abort listener.
+   * If abort is requested, the operation is immediately rejected.
+   */
+  async raceWithAbort<T>(operation: Promise<T>, operationName: string): Promise<T> {
+    console.log(`[AbortManager] Starting ${operationName} (abort-aware)...`);
+
+    try {
+      const result = await Promise.race([operation, this.abortPromise]);
+      console.log(`[AbortManager] ${operationName} completed successfully`);
+      return result;
+    } catch (error) {
+      if (error instanceof AbortRequestedError) {
+        console.log(`[AbortManager] ${operationName} aborted by user`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Check if abort has been requested (synchronous check).
+   */
+  get aborted(): boolean {
+    return this.isAborted;
+  }
+
+  /**
+   * Clean up the Firestore listener. Call this when processing completes.
+   */
+  cleanup(): void {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+      console.log('[AbortManager] Listener cleaned up:', { conversationId: this.conversationId });
+    }
+  }
+}
+
+/**
  * Check if abort has been requested for this conversation.
  * Throws AbortRequestedError if abort flag is set.
+ *
+ * NOTE: This is the legacy checkpoint-based check. The AbortManager provides
+ * real-time abort detection. This function is kept for backward compatibility
+ * and as a safety net at processing boundaries.
  */
 async function checkAbort(conversationId: string): Promise<void> {
   const doc = await db.collection('conversations').doc(conversationId).get();
@@ -739,6 +828,10 @@ export const transcribeAudio = onObjectFinalized(
     // Initialize progress tracking (before try block so it's accessible in catch)
     const progressManager = new ProgressManager(conversationId);
 
+    // Initialize abort manager for real-time abort detection
+    // This sets up a Firestore listener that immediately detects cancel requests
+    const abortManager = new AbortManager(conversationId);
+
     // Track partial metrics for abort scenarios - updated as processing progresses
     // This allows us to record resource usage even if user aborts mid-process
     const partialMetrics = {
@@ -812,10 +905,10 @@ export const transcribeAudio = onObjectFinalized(
       let whisperxHints: WhisperXDiarizationHints | undefined;
 
       try {
-        preAnalysisResult = await preAnalyzeAudioWithGemini(
-          audioBuffer,
-          conversationId,
-          userId
+        // Wrap in raceWithAbort for immediate cancel response
+        preAnalysisResult = await abortManager.raceWithAbort(
+          preAnalyzeAudioWithGemini(audioBuffer, conversationId, userId),
+          'Gemini pre-analysis'
         );
 
         // Convert to WhisperX hints format
@@ -854,22 +947,29 @@ export const transcribeAudio = onObjectFinalized(
       }
 
       // Try robust WhisperX first (handles large responses better)
-      let whisperxResult = await transcribeWithWhisperXRobust(
-        audioBuffer,
-        replicateApiToken.value(),
-        hfToken || undefined,
-        2, // maxRetries
-        whisperxHints  // Pass the hints from Gemini pre-analysis
+      // Wrap in raceWithAbort for immediate cancel response
+      let whisperxResult = await abortManager.raceWithAbort(
+        transcribeWithWhisperXRobust(
+          audioBuffer,
+          replicateApiToken.value(),
+          hfToken || undefined,
+          2, // maxRetries
+          whisperxHints  // Pass the hints from Gemini pre-analysis
+        ),
+        'WhisperX transcription (robust)'
       );
 
       // If robust method failed, try standard method as backup
       if (whisperxResult.status === 'error') {
         console.warn('[Transcribe] Robust WhisperX failed, trying standard method...');
-        whisperxResult = await transcribeWithWhisperX(
-          audioBuffer,
-          replicateApiToken.value(),
-          hfToken || undefined,
-          whisperxHints  // Pass hints here too
+        whisperxResult = await abortManager.raceWithAbort(
+          transcribeWithWhisperX(
+            audioBuffer,
+            replicateApiToken.value(),
+            hfToken || undefined,
+            whisperxHints  // Pass hints here too
+          ),
+          'WhisperX transcription (standard)'
         );
       }
 
@@ -879,10 +979,9 @@ export const transcribeAudio = onObjectFinalized(
       if (whisperxResult.status === 'error') {
         console.warn('[Transcribe] WhisperX failed completely, falling back to Gemini transcription...');
 
-        const geminiTranscriptResult = await transcribeWithGeminiFallback(
-          audioBuffer,
-          conversationId,
-          userId
+        const geminiTranscriptResult = await abortManager.raceWithAbort(
+          transcribeWithGeminiFallback(audioBuffer, conversationId, userId),
+          'Gemini transcription fallback'
         );
 
         if (geminiTranscriptResult.status === 'error') {
@@ -991,11 +1090,14 @@ export const transcribeAudio = onObjectFinalized(
         console.log('[Transcribe] Step 3: Calling Gemini for analysis (fallback)...');
         const geminiStartTime = Date.now();
 
-        const analysisResult = await analyzeTranscriptWithGemini(
-          whisperxSegments.segments,
-          whisperxSegments.speakers,
-          conversationId,
-          userId
+        const analysisResult = await abortManager.raceWithAbort(
+          analyzeTranscriptWithGemini(
+            whisperxSegments.segments,
+            whisperxSegments.speakers,
+            conversationId,
+            userId
+          ),
+          'Gemini transcript analysis'
         );
         analysis = analysisResult.analysis;
         geminiAnalysisTokens = analysisResult.tokenUsage;
@@ -1038,11 +1140,14 @@ export const transcribeAudio = onObjectFinalized(
       console.log('[Transcribe] Step 3.4: Identifying speakers from transcript content...');
       const speakerIdStartTime = Date.now();
 
-      const speakerIdentificationResult = await identifySpeakersFromContent(
-        whisperxSegments.segments,
-        whisperxSegments.speakers,
-        conversationId,
-        userId
+      const speakerIdentificationResult = await abortManager.raceWithAbort(
+        identifySpeakersFromContent(
+          whisperxSegments.segments,
+          whisperxSegments.speakers,
+          conversationId,
+          userId
+        ),
+        'Gemini speaker identification'
       );
 
       // Collect labels for billing reconciliation
@@ -1378,6 +1483,9 @@ export const transcribeAudio = onObjectFinalized(
       });
 
       console.debug('[Transcribe] Firestore updated with failed status');
+    } finally {
+      // Always clean up the abort listener to prevent memory leaks
+      abortManager.cleanup();
     }
   }
 );
