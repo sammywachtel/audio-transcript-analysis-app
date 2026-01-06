@@ -681,6 +681,622 @@ Return as JSON with a "segments" array.
 }
 
 /**
+ * Parameters for the transcription pipeline (shared between storage trigger and HTTP function)
+ */
+export interface TranscriptionPipelineParams {
+  conversationId: string;
+  userId: string;
+  filePath: string;
+  replicateApiToken: string;
+  huggingfaceAccessToken: string;
+  audioSizeBytes?: number; // Optional - for logging only
+}
+
+/**
+ * Execute the full transcription pipeline.
+ *
+ * This is the core processing logic shared between:
+ * - transcribeAudio (storage trigger, now just enqueues to Cloud Tasks)
+ * - processTranscription (HTTP function, executes the heavy processing)
+ *
+ * Steps:
+ * 1. Download audio from Storage
+ * 2. Pre-analyze with Gemini (speaker hints)
+ * 3. Transcribe with WhisperX (or Gemini fallback)
+ * 4. Analyze content with Gemini (topics, terms, people)
+ * 5. Identify speakers from content
+ * 6. Apply speaker corrections
+ * 7. Save results to Firestore
+ *
+ * On error, updates Firestore status to 'failed' and records metrics.
+ * On abort, updates status to 'aborted' and records partial metrics.
+ */
+export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<void> {
+  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes } = params;
+
+  // Initialize progress tracking
+  const progressManager = new ProgressManager(conversationId);
+
+  // Track partial metrics for abort scenarios
+  const partialMetrics = {
+    timingMs: {
+      download: 0,
+      whisperx: 0,
+      buildSegments: 0,
+      gemini: 0,
+      speakerCorrection: 0,
+      transform: 0,
+      firestore: 0,
+      total: 0
+    },
+    llmUsage: {
+      geminiAnalysis: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+      geminiSpeakerCorrection: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
+      whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const },
+      diarization: { predictionId: '', computeTimeSeconds: 0, model: 'pyannote-diarization' as const }
+    },
+    geminiLabels: [] as Record<string, string>[],
+    segmentCount: 0,
+    speakerCount: 0,
+    termCount: 0,
+    topicCount: 0,
+    personCount: 0,
+    speakerCorrectionsApplied: 0,
+    audioSizeMB: audioSizeBytes ? audioSizeBytes / (1024 * 1024) : 0,
+    durationMs: 0,
+    processStartTime: Date.now()
+  };
+
+  try {
+    // Start pre-analysis step
+    await progressManager.setStep(ProcessingStep.PRE_ANALYZING);
+
+    // Download audio file to memory
+    console.debug('[Pipeline] Starting audio download from Storage...');
+    const downloadStartTime = Date.now();
+    const file = bucket.file(filePath);
+    const [audioBuffer] = await file.download();
+    const downloadDurationMs = Date.now() - downloadStartTime;
+
+    console.log('[Pipeline] Audio downloaded:', {
+      conversationId,
+      bufferSizeBytes: audioBuffer.length,
+      bufferSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
+      downloadDurationMs,
+      downloadSpeedMBps: ((audioBuffer.length / (1024 * 1024)) / (downloadDurationMs / 1000)).toFixed(2)
+    });
+
+    partialMetrics.timingMs.download = downloadDurationMs;
+    partialMetrics.audioSizeMB = audioBuffer.length / (1024 * 1024);
+
+    // Check for abort after download
+    await checkAbort(conversationId);
+
+    // Step 1: Pre-analyze with Gemini to get speaker hints
+    console.log('[Pipeline] Step 1: Pre-analyzing audio with Gemini...');
+    const preAnalysisStartTime = Date.now();
+
+    let preAnalysisResult: GeminiPreAnalysisResult | null = null;
+    let whisperxHints: WhisperXDiarizationHints | undefined;
+
+    try {
+      preAnalysisResult = await preAnalyzeAudioWithGemini(
+        audioBuffer,
+        conversationId,
+        userId
+      );
+
+      whisperxHints = {
+        numSpeakers: preAnalysisResult.hints.numSpeakers,
+        speakerNames: preAnalysisResult.hints.speakerNames
+      };
+
+      console.log('[Pipeline] Pre-analysis complete:', {
+        speakerCount: whisperxHints.numSpeakers,
+        speakerNames: whisperxHints.speakerNames,
+        durationMs: Date.now() - preAnalysisStartTime
+      });
+
+      partialMetrics.geminiLabels.push(preAnalysisResult.labels);
+    } catch (error) {
+      console.warn('[Pipeline] Pre-analysis failed, continuing without hints:', error);
+    }
+
+    const preAnalysisDurationMs = Date.now() - preAnalysisStartTime;
+
+    // Check for abort after pre-analysis
+    await checkAbort(conversationId);
+
+    // Step 2: Transcribe with WhisperX
+    await progressManager.setStep(ProcessingStep.TRANSCRIBING);
+    console.log('[Pipeline] Step 2: Calling WhisperX for transcription with hints...');
+    const whisperxStartTime = Date.now();
+
+    const hfToken = huggingfaceAccessToken || undefined;
+    if (!hfToken) {
+      console.warn('[Pipeline] HUGGINGFACE_ACCESS_TOKEN not set - speaker diarization will be disabled');
+    }
+
+    // Try robust WhisperX first
+    let whisperxResult = await transcribeWithWhisperXRobust(
+      audioBuffer,
+      replicateApiToken,
+      hfToken,
+      2,
+      whisperxHints
+    );
+
+    // If robust method failed, try standard method as backup
+    if (whisperxResult.status === 'error') {
+      console.warn('[Pipeline] Robust WhisperX failed, trying standard method...');
+      whisperxResult = await transcribeWithWhisperX(
+        audioBuffer,
+        replicateApiToken,
+        hfToken,
+        whisperxHints
+      );
+    }
+
+    const whisperxDurationMs = Date.now() - whisperxStartTime;
+
+    // If WhisperX completely failed, fall back to Gemini transcription
+    if (whisperxResult.status === 'error') {
+      console.warn('[Pipeline] WhisperX failed completely, falling back to Gemini transcription...');
+
+      const geminiTranscriptResult = await transcribeWithGeminiFallback(
+        audioBuffer,
+        conversationId,
+        userId
+      );
+
+      if (geminiTranscriptResult.status === 'error') {
+        throw new Error(`Both WhisperX and Gemini transcription failed. WhisperX: ${whisperxResult.error}. Gemini: ${geminiTranscriptResult.error}`);
+      }
+
+      whisperxResult = geminiTranscriptResult;
+      console.log('[Pipeline] Using Gemini transcription as fallback (timestamps may be approximate)');
+      await progressManager.setStep(ProcessingStep.ANALYZING);
+    }
+
+    const usedGeminiFallback = 'usedFallback' in whisperxResult && whisperxResult.usedFallback === true;
+
+    console.log('[Pipeline] WhisperX transcription complete:', {
+      conversationId,
+      durationMs: whisperxDurationMs,
+      segmentCount: whisperxResult.segments.length
+    });
+
+    partialMetrics.timingMs.whisperx = whisperxDurationMs;
+
+    const actualComputeSeconds = whisperxResult.actualComputeSeconds;
+    const computeSeconds = actualComputeSeconds ?? (whisperxDurationMs / 1000);
+
+    if (actualComputeSeconds) {
+      console.log(`[Pipeline] Using actual Replicate compute time: ${actualComputeSeconds}s`);
+    } else {
+      console.warn(`[Pipeline] Estimating compute time from wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s`);
+    }
+
+    partialMetrics.llmUsage.whisperx.computeTimeSeconds = computeSeconds;
+    partialMetrics.llmUsage.diarization.computeTimeSeconds = computeSeconds * 0.3;
+
+    const whisperxPredictionId = whisperxResult.predictionId;
+    if (whisperxPredictionId) {
+      partialMetrics.llmUsage.whisperx.predictionId = whisperxPredictionId;
+      partialMetrics.llmUsage.diarization.predictionId = whisperxPredictionId;
+    }
+
+    // Check for abort after WhisperX
+    await checkAbort(conversationId);
+
+    // Build segments from WhisperX output
+    console.debug('[Pipeline] Building segments from WhisperX...');
+    const buildStartTime = Date.now();
+
+    const whisperxSegments = buildSegmentsFromWhisperX(whisperxResult.segments);
+    whisperxSegments.segments = fixSegmentBoundaries(whisperxSegments.segments);
+
+    const buildDurationMs = Date.now() - buildStartTime;
+    console.debug('[Pipeline] Segments built:', {
+      buildDurationMs,
+      segmentCount: whisperxSegments.segments.length,
+      speakerCount: whisperxSegments.speakers.length
+    });
+
+    // Update progress: analyzing with Gemini
+    await progressManager.setStep(ProcessingStep.ANALYZING);
+
+    // Step 3: Get content analysis
+    let analysis: GeminiAnalysis;
+    let geminiAnalysisTokens: GeminiUsage;
+    let geminiDurationMs: number;
+
+    if (preAnalysisResult) {
+      console.log('[Pipeline] Step 3: Using pre-analysis results (no additional Gemini call)');
+
+      analysis = {
+        ...preAnalysisResult.analysis,
+        topics: mapTopicTimesToSegmentIndices(
+          preAnalysisResult.analysis.topics,
+          whisperxSegments.segments
+        )
+      };
+      geminiAnalysisTokens = preAnalysisResult.tokenUsage;
+      geminiDurationMs = preAnalysisDurationMs;
+
+      console.log('[Pipeline] Pre-analysis results applied:', {
+        conversationId,
+        title: analysis.title,
+        termCount: analysis.terms?.length ?? 0,
+        topicCount: analysis.topics?.length ?? 0,
+        personCount: analysis.people?.length ?? 0
+      });
+    } else {
+      console.log('[Pipeline] Step 3: Calling Gemini for analysis (fallback)...');
+      const geminiStartTime = Date.now();
+
+      const analysisResult = await analyzeTranscriptWithGemini(
+        whisperxSegments.segments,
+        whisperxSegments.speakers,
+        conversationId,
+        userId
+      );
+      analysis = analysisResult.analysis;
+      geminiAnalysisTokens = analysisResult.tokenUsage;
+
+      partialMetrics.geminiLabels.push(analysisResult.labels);
+
+      geminiDurationMs = Date.now() - geminiStartTime;
+      console.log('[Pipeline] Gemini analysis complete:', {
+        conversationId,
+        durationMs: geminiDurationMs,
+        title: analysis.title,
+        termCount: analysis.terms?.length ?? 0,
+        topicCount: analysis.topics?.length ?? 0,
+        personCount: analysis.people?.length ?? 0
+      });
+    }
+
+    partialMetrics.timingMs.gemini = geminiDurationMs;
+    partialMetrics.llmUsage.geminiAnalysis = {
+      inputTokens: geminiAnalysisTokens.inputTokens,
+      outputTokens: geminiAnalysisTokens.outputTokens,
+      model: 'gemini-2.5-flash'
+    };
+    partialMetrics.segmentCount = whisperxSegments.segments.length;
+    partialMetrics.speakerCount = whisperxSegments.speakers.length;
+    partialMetrics.termCount = analysis.terms?.length ?? 0;
+    partialMetrics.topicCount = analysis.topics?.length ?? 0;
+    partialMetrics.personCount = analysis.people?.length ?? 0;
+
+    // Check for abort after Gemini analysis
+    await checkAbort(conversationId);
+
+    // Step 3.4: Content-based speaker identification
+    console.log('[Pipeline] Step 3.4: Identifying speakers from transcript content...');
+    const speakerIdStartTime = Date.now();
+
+    const speakerIdentificationResult = await identifySpeakersFromContent(
+      whisperxSegments.segments,
+      whisperxSegments.speakers,
+      conversationId,
+      userId
+    );
+
+    partialMetrics.geminiLabels.push(speakerIdentificationResult.labels);
+
+    const speakerIdDurationMs = Date.now() - speakerIdStartTime;
+    console.log('[Pipeline] Content-based speaker identification complete:', {
+      conversationId,
+      durationMs: speakerIdDurationMs,
+      speakerNotesFound: speakerIdentificationResult.speakerNotes?.length ?? 0
+    });
+
+    if (speakerIdentificationResult.speakerNotes && speakerIdentificationResult.speakerNotes.length > 0) {
+      analysis.speakerNotes = speakerIdentificationResult.speakerNotes;
+      console.log('[Pipeline] Using content-based speaker identification (overriding pre-analysis)');
+    } else {
+      console.warn('[Pipeline] Content-based identification returned no speaker notes, using pre-analysis fallback');
+    }
+
+    partialMetrics.llmUsage.geminiAnalysis.inputTokens += speakerIdentificationResult.tokenUsage.inputTokens;
+    partialMetrics.llmUsage.geminiAnalysis.outputTokens += speakerIdentificationResult.tokenUsage.outputTokens;
+
+    // Step 3.5: Speaker reassignment pass
+    await progressManager.setStep(ProcessingStep.REASSIGNING);
+    console.log('[Pipeline] Step 3.5: Identifying speaker reassignments...');
+    const speakerCorrectionStartTime = Date.now();
+
+    const correctionResult = await identifySpeakerReassignments(
+      whisperxSegments.segments,
+      whisperxSegments.speakers,
+      conversationId,
+      userId
+    );
+    const { corrections: speakerCorrections, tokenUsage: geminiCorrectionTokens } = correctionResult;
+
+    partialMetrics.geminiLabels.push(correctionResult.labels);
+
+    const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
+    console.log('[Pipeline] Speaker reassignment analysis complete:', {
+      conversationId,
+      durationMs: speakerCorrectionDurationMs,
+      correctionCount: speakerCorrections.length
+    });
+
+    partialMetrics.timingMs.speakerCorrection = speakerCorrectionDurationMs;
+    partialMetrics.llmUsage.geminiSpeakerCorrection = {
+      inputTokens: geminiCorrectionTokens.inputTokens,
+      outputTokens: geminiCorrectionTokens.outputTokens,
+      model: 'gemini-2.5-flash'
+    };
+    partialMetrics.speakerCorrectionsApplied = speakerCorrections.length;
+
+    // Apply speaker reassignments
+    if (speakerCorrections.length > 0) {
+      whisperxSegments.segments = applySpeakerReassignments(
+        whisperxSegments.segments,
+        speakerCorrections,
+        whisperxSegments.speakers.map(s => s.id)
+      );
+    }
+
+    // Update progress: finalizing
+    await progressManager.setStep(ProcessingStep.FINALIZING);
+
+    // Step 4: Transform to our data model
+    console.debug('[Pipeline] Step 4: Merging WhisperX and Gemini data...');
+    const transformStartTime = Date.now();
+
+    const processedData = mergeWhisperXAndGeminiData(
+      whisperxSegments,
+      analysis,
+      conversationId,
+      userId
+    );
+
+    const transformDurationMs = Date.now() - transformStartTime;
+    console.debug('[Pipeline] Transform complete:', {
+      transformDurationMs,
+      finalSegmentCount: processedData.segments.length,
+      termOccurrenceCount: processedData.termOccurrences.length,
+      durationMs: processedData.durationMs
+    });
+
+    partialMetrics.durationMs = processedData.durationMs;
+
+    // Check for abort before final save
+    await checkAbort(conversationId);
+
+    // Determine alignment status
+    const finalAlignmentStatus = usedGeminiFallback ? 'fallback' : 'aligned';
+
+    // Save results to Firestore
+    console.debug('[Pipeline] Saving results to Firestore...');
+    const firestoreStartTime = Date.now();
+    await retryWithBackoff(
+      () => db.collection('conversations').doc(conversationId).update({
+        ...processedData,
+        status: 'complete',
+        alignmentStatus: finalAlignmentStatus,
+        alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
+        abortRequested: false,
+        audioStoragePath: filePath,
+        updatedAt: FieldValue.serverTimestamp()
+      }),
+      'Firestore save results'
+    );
+    const firestoreDurationMs = Date.now() - firestoreStartTime;
+
+    const totalDurationMs = Date.now() - downloadStartTime;
+    console.log('[Pipeline] ✅ Transcription complete:', {
+      conversationId,
+      segmentCount: processedData.segments.length,
+      speakerCount: Object.keys(processedData.speakers).length,
+      termCount: Object.keys(processedData.terms).length,
+      topicCount: processedData.topics.length,
+      personCount: processedData.people.length,
+      alignmentStatus: finalAlignmentStatus,
+      speakerCorrectionsApplied: speakerCorrections.length,
+      timingMs: {
+        download: downloadDurationMs,
+        whisperx: whisperxDurationMs,
+        buildSegments: buildDurationMs,
+        gemini: geminiDurationMs,
+        speakerCorrection: speakerCorrectionDurationMs,
+        transform: transformDurationMs,
+        firestore: firestoreDurationMs,
+        total: totalDurationMs
+      }
+    });
+
+    // Build LLM usage breakdown for cost tracking
+    const llmUsage: LLMUsage = {
+      geminiAnalysis: geminiAnalysisTokens,
+      geminiSpeakerCorrection: geminiCorrectionTokens,
+      whisperx: {
+        computeTimeSeconds: whisperxDurationMs / 1000,
+        model: 'whisperx',
+        predictionId: whisperxPredictionId
+      }
+    };
+
+    // Calculate estimated costs
+    const costResult = await calculateCost(llmUsage);
+
+    console.log('[Pipeline] LLM usage and cost breakdown:', {
+      conversationId,
+      geminiAnalysisTokens: geminiAnalysisTokens.inputTokens + geminiAnalysisTokens.outputTokens,
+      geminiCorrectionTokens: geminiCorrectionTokens.inputTokens + geminiCorrectionTokens.outputTokens,
+      whisperxComputeSec: llmUsage.whisperx.computeTimeSeconds.toFixed(1),
+      estimatedCostUsd: costResult.estimatedCost.totalUsd.toFixed(6)
+    });
+
+    // Record metrics for observability dashboard
+    await recordMetrics({
+      conversationId,
+      userId,
+      status: 'success',
+      alignmentStatus: finalAlignmentStatus,
+      timingMs: {
+        download: downloadDurationMs,
+        whisperx: whisperxDurationMs,
+        buildSegments: buildDurationMs,
+        gemini: geminiDurationMs,
+        speakerCorrection: speakerCorrectionDurationMs,
+        transform: transformDurationMs,
+        firestore: firestoreDurationMs,
+        total: totalDurationMs
+      },
+      segmentCount: processedData.segments.length,
+      speakerCount: Object.keys(processedData.speakers).length,
+      termCount: Object.keys(processedData.terms).length,
+      topicCount: processedData.topics.length,
+      personCount: processedData.people.length,
+      speakerCorrectionsApplied: speakerCorrections.length,
+      audioSizeMB: audioBuffer.length / (1024 * 1024),
+      durationMs: processedData.durationMs,
+      llmUsage,
+      geminiLabels: partialMetrics.geminiLabels,
+      estimatedCost: costResult.estimatedCost,
+      pricingSnapshot: costResult.pricingSnapshot
+    });
+
+    // Record processing_completed event for user stats
+    await recordUserEvent({
+      eventType: 'processing_completed',
+      userId,
+      conversationId,
+      metadata: {
+        durationMs: processedData.durationMs,
+        estimatedCostUsd: costResult.estimatedCost.totalUsd,
+        segmentCount: processedData.segments.length
+      }
+    });
+
+    // Mark processing as complete
+    await progressManager.setComplete();
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const isAbort = error instanceof AbortRequestedError;
+
+    if (isAbort) {
+      // Handle abort - record partial metrics
+      console.log('[Pipeline] ⏹️ Processing aborted by user:', { conversationId });
+
+      partialMetrics.timingMs.total = Date.now() - partialMetrics.processStartTime;
+
+      const partialCostResult = await calculateCost(partialMetrics.llmUsage);
+
+      console.log('[Pipeline] Recording partial metrics on abort:', {
+        conversationId,
+        elapsedMs: partialMetrics.timingMs.total,
+        estimatedCostUsd: partialCostResult.estimatedCost.totalUsd
+      });
+
+      await recordMetrics({
+        conversationId,
+        userId,
+        status: 'aborted',
+        errorMessage: 'Processing was cancelled by user',
+        timingMs: partialMetrics.timingMs,
+        segmentCount: partialMetrics.segmentCount,
+        speakerCount: partialMetrics.speakerCount,
+        termCount: partialMetrics.termCount,
+        topicCount: partialMetrics.topicCount,
+        personCount: partialMetrics.personCount,
+        speakerCorrectionsApplied: partialMetrics.speakerCorrectionsApplied,
+        audioSizeMB: partialMetrics.audioSizeMB,
+        durationMs: partialMetrics.durationMs,
+        llmUsage: partialMetrics.llmUsage,
+        geminiLabels: partialMetrics.geminiLabels,
+        estimatedCost: partialCostResult.estimatedCost,
+        pricingSnapshot: partialCostResult.pricingSnapshot
+      });
+
+      await recordUserEvent({
+        eventType: 'processing_aborted',
+        userId,
+        conversationId,
+        metadata: {
+          estimatedCostUsd: partialCostResult.estimatedCost.totalUsd,
+          elapsedMs: partialMetrics.timingMs.total
+        }
+      });
+
+      await db.collection('conversations').doc(conversationId).update({
+        status: 'aborted',
+        processingError: 'Processing was cancelled by user',
+        abortRequested: false,
+        updatedAt: FieldValue.serverTimestamp()
+      });
+
+      await progressManager.setFailed('Aborted by user');
+      return;
+    }
+
+    // Handle general failure
+    console.error('[Pipeline] ❌ Transcription failed:', {
+      conversationId,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      errorMessage,
+      errorStack: error instanceof Error ? error.stack : undefined
+    });
+
+    // Record failure metrics
+    await recordMetrics({
+      conversationId,
+      userId,
+      status: 'failed',
+      errorMessage,
+      timingMs: {
+        download: 0,
+        whisperx: 0,
+        buildSegments: 0,
+        gemini: 0,
+        speakerCorrection: 0,
+        transform: 0,
+        firestore: 0,
+        total: 0
+      },
+      segmentCount: 0,
+      speakerCount: 0,
+      termCount: 0,
+      topicCount: 0,
+      personCount: 0,
+      speakerCorrectionsApplied: 0,
+      audioSizeMB: 0,
+      durationMs: 0
+    });
+
+    await recordUserEvent({
+      eventType: 'processing_failed',
+      userId,
+      conversationId,
+      metadata: {
+        errorMessage
+      }
+    });
+
+    // Mark processing as failed
+    await progressManager.setFailed(errorMessage);
+
+    // Update status to failed
+    await db.collection('conversations').doc(conversationId).update({
+      status: 'failed',
+      processingError: errorMessage,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+
+    console.debug('[Pipeline] Firestore updated with failed status');
+
+    // Re-throw so calling function can handle (e.g., return 500 for Cloud Tasks retry)
+    throw error;
+  }
+}
+
+/**
  * Triggered when an audio file is uploaded to storage.
  * Path pattern: audio/{userId}/{conversationId}.{extension}
  */
@@ -726,7 +1342,7 @@ export const transcribeAudio = onObjectFinalized(
     const conversationId = fileName.split('.')[0];
     const fileExtension = fileName.split('.').pop();
 
-    console.log('[Transcribe] Processing audio file:', {
+    console.log('[Transcribe] Audio file uploaded - enqueuing for processing:', {
       filePath,
       userId,
       conversationId,
@@ -736,658 +1352,139 @@ export const transcribeAudio = onObjectFinalized(
       sizeMB: (event.data.size / (1024 * 1024)).toFixed(2)
     });
 
-    // Initialize progress tracking (before try block so it's accessible in catch)
-    const progressManager = new ProgressManager(conversationId);
-
-    // Track partial metrics for abort scenarios - updated as processing progresses
-    // This allows us to record resource usage even if user aborts mid-process
-    const partialMetrics = {
-      timingMs: {
-        download: 0,
-        whisperx: 0,
-        buildSegments: 0,
-        gemini: 0,
-        speakerCorrection: 0,
-        transform: 0,
-        firestore: 0,
-        total: 0
-      },
-      llmUsage: {
-        geminiAnalysis: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
-        geminiSpeakerCorrection: { inputTokens: 0, outputTokens: 0, model: 'gemini-2.5-flash' as const },
-        whisperx: { predictionId: '', computeTimeSeconds: 0, model: 'whisperx-diarization' as const },
-        diarization: { predictionId: '', computeTimeSeconds: 0, model: 'pyannote-diarization' as const }
-      },
-      geminiLabels: [] as Record<string, string>[],  // Collect labels from each Gemini call
-      segmentCount: 0,
-      speakerCount: 0,
-      termCount: 0,
-      topicCount: 0,
-      personCount: 0,
-      speakerCorrectionsApplied: 0,
-      audioSizeMB: event.data.size ? event.data.size / (1024 * 1024) : 0,
-      durationMs: 0,
-      processStartTime: Date.now()
-    };
-
     try {
-      // Update status to processing
-      await db.collection('conversations').doc(conversationId).update({
-        status: 'processing',
+      // Update status to queued (processing will start when Cloud Tasks picks it up)
+      // Using set() with merge to handle race condition where storage trigger fires
+      // before frontend has created the Firestore document
+      await db.collection('conversations').doc(conversationId).set({
+        conversationId,
+        userId,
+        status: 'queued',
+        queuedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
-      });
-
-      // Start pre-analysis step (Gemini analyzes audio structure before WhisperX)
-      await progressManager.setStep(ProcessingStep.PRE_ANALYZING);
-
-      // Download audio file to memory
-      console.debug('[Transcribe] Starting audio download from Storage...');
-      const downloadStartTime = Date.now();
-      const file = bucket.file(filePath);
-      const [audioBuffer] = await file.download();
-      const downloadDurationMs = Date.now() - downloadStartTime;
-
-      console.log('[Transcribe] Audio downloaded:', {
-        conversationId,
-        bufferSizeBytes: audioBuffer.length,
-        bufferSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
-        downloadDurationMs,
-        downloadSpeedMBps: ((audioBuffer.length / (1024 * 1024)) / (downloadDurationMs / 1000)).toFixed(2)
-      });
-
-      // Update partial metrics after download
-      partialMetrics.timingMs.download = downloadDurationMs;
-
-      // Check for abort after download
-      await checkAbort(conversationId);
-
-      // === GEMINI-FIRST ARCHITECTURE ===
-      // Step 1: Pre-analyze with Gemini to get speaker hints + full content analysis
-      // This runs BEFORE WhisperX to provide hints that improve diarization accuracy
-      // (PRE_ANALYZING step already set at function start - includes download time)
-      console.log('[Transcribe] Step 1: Pre-analyzing audio with Gemini...');
-      const preAnalysisStartTime = Date.now();
-
-      let preAnalysisResult: GeminiPreAnalysisResult | null = null;
-      let whisperxHints: WhisperXDiarizationHints | undefined;
-
-      try {
-        preAnalysisResult = await preAnalyzeAudioWithGemini(
-          audioBuffer,
-          conversationId,
-          userId
-        );
-
-        // Convert to WhisperX hints format
-        whisperxHints = {
-          numSpeakers: preAnalysisResult.hints.numSpeakers,
-          speakerNames: preAnalysisResult.hints.speakerNames
-        };
-
-        console.log('[Transcribe] Pre-analysis complete:', {
-          speakerCount: whisperxHints.numSpeakers,
-          speakerNames: whisperxHints.speakerNames,
-          durationMs: Date.now() - preAnalysisStartTime
-        });
-
-        // Collect labels for billing reconciliation
-        partialMetrics.geminiLabels.push(preAnalysisResult.labels);
-      } catch (error) {
-        // Pre-analysis is optional - continue without hints if it fails
-        console.warn('[Transcribe] Pre-analysis failed, continuing without hints:', error);
-      }
-
-      const preAnalysisDurationMs = Date.now() - preAnalysisStartTime;
-
-      // Check for abort after pre-analysis
-      await checkAbort(conversationId);
-
-      // Step 2: Get transcript + timestamps from WhisperX (with hints from Gemini)
-      await progressManager.setStep(ProcessingStep.TRANSCRIBING);
-      console.log('[Transcribe] Step 2: Calling WhisperX for transcription with hints...');
-      const whisperxStartTime = Date.now();
-
-      // Pass HF token for speaker diarization (optional but recommended)
-      const hfToken = huggingfaceAccessToken.value();
-      if (!hfToken) {
-        console.warn('[Transcribe] HUGGINGFACE_ACCESS_TOKEN not set - speaker diarization will be disabled');
-      }
-
-      // Try robust WhisperX first (handles large responses better)
-      let whisperxResult = await transcribeWithWhisperXRobust(
-        audioBuffer,
-        replicateApiToken.value(),
-        hfToken || undefined,
-        2, // maxRetries
-        whisperxHints  // Pass the hints from Gemini pre-analysis
-      );
-
-      // If robust method failed, try standard method as backup
-      if (whisperxResult.status === 'error') {
-        console.warn('[Transcribe] Robust WhisperX failed, trying standard method...');
-        whisperxResult = await transcribeWithWhisperX(
-          audioBuffer,
-          replicateApiToken.value(),
-          hfToken || undefined,
-          whisperxHints  // Pass hints here too
-        );
-      }
-
-      const whisperxDurationMs = Date.now() - whisperxStartTime;
-
-      // If WhisperX completely failed, fall back to Gemini transcription
-      if (whisperxResult.status === 'error') {
-        console.warn('[Transcribe] WhisperX failed completely, falling back to Gemini transcription...');
-
-        const geminiTranscriptResult = await transcribeWithGeminiFallback(
-          audioBuffer,
-          conversationId,
-          userId
-        );
-
-        if (geminiTranscriptResult.status === 'error') {
-          throw new Error(`Both WhisperX and Gemini transcription failed. WhisperX: ${whisperxResult.error}. Gemini: ${geminiTranscriptResult.error}`);
-        }
-
-        // Use Gemini result with fallback alignment status
-        whisperxResult = geminiTranscriptResult;
-        console.log('[Transcribe] Using Gemini transcription as fallback (timestamps may be approximate)');
-
-        // Update progress to note fallback
-        await progressManager.setStep(ProcessingStep.ANALYZING);
-      }
-
-      // Track if we used the Gemini fallback for alignment status
-      const usedGeminiFallback = 'usedFallback' in whisperxResult && whisperxResult.usedFallback === true;
-
-      console.log('[Transcribe] WhisperX transcription complete:', {
-        conversationId,
-        durationMs: whisperxDurationMs,
-        durationSec: (whisperxDurationMs / 1000).toFixed(1),
-        segmentCount: whisperxResult.segments.length,
-        firstSegment: whisperxResult.segments[0],
-        lastSegment: whisperxResult.segments[whisperxResult.segments.length - 1]
-      });
-
-      // Update partial metrics after WhisperX (most expensive step)
-      partialMetrics.timingMs.whisperx = whisperxDurationMs;
-
-      // Use actual GPU compute time from Replicate metrics if available
-      // Falls back to wall-clock estimate if metrics not available
-      const actualComputeSeconds = whisperxResult.actualComputeSeconds;
-      const computeSeconds = actualComputeSeconds ?? (whisperxDurationMs / 1000);
-
-      if (actualComputeSeconds) {
-        console.log(`[Transcribe] Using actual Replicate compute time: ${actualComputeSeconds}s (wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s)`);
-      } else {
-        console.warn(`[Transcribe] Replicate metrics unavailable, estimating compute time from wall-clock: ${(whisperxDurationMs / 1000).toFixed(1)}s`);
-      }
-
-      partialMetrics.llmUsage.whisperx.computeTimeSeconds = computeSeconds;
-      partialMetrics.llmUsage.diarization.computeTimeSeconds = computeSeconds * 0.3; // ~30% is diarization
-
-      // Capture prediction ID for billing traceability (from robust method - standard method doesn't expose it)
-      const whisperxPredictionId = whisperxResult.predictionId;
-      if (whisperxPredictionId) {
-        partialMetrics.llmUsage.whisperx.predictionId = whisperxPredictionId;
-        // Diarization runs as part of the same prediction
-        partialMetrics.llmUsage.diarization.predictionId = whisperxPredictionId;
-      }
-
-      // Check for abort after WhisperX (most expensive step)
-      await checkAbort(conversationId);
-
-      // Step 2: Build segments from WhisperX output
-      console.debug('[Transcribe] Step 2: Building segments from WhisperX...');
-      const buildStartTime = Date.now();
-
-      const whisperxSegments = buildSegmentsFromWhisperX(whisperxResult.segments);
-
-      // Step 2.5: Fix segment boundaries (diarization often splits a few words late)
-      console.debug('[Transcribe] Step 2.5: Fixing segment boundaries...');
-      whisperxSegments.segments = fixSegmentBoundaries(whisperxSegments.segments);
-
-      const buildDurationMs = Date.now() - buildStartTime;
-      console.debug('[Transcribe] Segments built:', {
-        buildDurationMs,
-        segmentCount: whisperxSegments.segments.length,
-        speakerCount: whisperxSegments.speakers.length
-      });
-
-      // Update progress: analyzing with Gemini
-      await progressManager.setStep(ProcessingStep.ANALYZING);
-
-      // Step 3: Get content analysis (use pre-analysis if available, otherwise call Gemini)
-      let analysis: GeminiAnalysis;
-      let geminiAnalysisTokens: GeminiUsage;
-      let geminiDurationMs: number;
-
-      if (preAnalysisResult) {
-        // Use pre-analysis result (already paid for audio tokens, analysis included)
-        console.log('[Transcribe] Step 3: Using pre-analysis results (no additional Gemini call)');
-
-        // Map topic timestamps (approximate seconds) to segment indices
-        analysis = {
-          ...preAnalysisResult.analysis,
-          topics: mapTopicTimesToSegmentIndices(
-            preAnalysisResult.analysis.topics,
-            whisperxSegments.segments
-          )
-        };
-        geminiAnalysisTokens = preAnalysisResult.tokenUsage;
-        geminiDurationMs = preAnalysisDurationMs; // Use pre-analysis time
-
-        console.log('[Transcribe] Pre-analysis results applied:', {
-          conversationId,
-          title: analysis.title,
-          termCount: analysis.terms?.length ?? 0,
-          topicCount: analysis.topics?.length ?? 0,
-          personCount: analysis.people?.length ?? 0,
-          inputTokens: geminiAnalysisTokens.inputTokens,
-          outputTokens: geminiAnalysisTokens.outputTokens
-        });
-      } else {
-        // Fallback: Call Gemini to analyze the transcript (pre-analysis failed or not available)
-        console.log('[Transcribe] Step 3: Calling Gemini for analysis (fallback)...');
-        const geminiStartTime = Date.now();
-
-        const analysisResult = await analyzeTranscriptWithGemini(
-          whisperxSegments.segments,
-          whisperxSegments.speakers,
-          conversationId,
-          userId
-        );
-        analysis = analysisResult.analysis;
-        geminiAnalysisTokens = analysisResult.tokenUsage;
-
-        // Collect labels for billing reconciliation
-        partialMetrics.geminiLabels.push(analysisResult.labels);
-
-        geminiDurationMs = Date.now() - geminiStartTime;
-        console.log('[Transcribe] Gemini analysis complete:', {
-          conversationId,
-          durationMs: geminiDurationMs,
-          durationSec: (geminiDurationMs / 1000).toFixed(1),
-          title: analysis.title,
-          termCount: analysis.terms?.length ?? 0,
-          topicCount: analysis.topics?.length ?? 0,
-          personCount: analysis.people?.length ?? 0,
-          inputTokens: geminiAnalysisTokens.inputTokens,
-          outputTokens: geminiAnalysisTokens.outputTokens
-        });
-      }
-
-      // Update partial metrics after Gemini analysis
-      partialMetrics.timingMs.gemini = geminiDurationMs;
-      partialMetrics.llmUsage.geminiAnalysis = {
-        inputTokens: geminiAnalysisTokens.inputTokens,
-        outputTokens: geminiAnalysisTokens.outputTokens,
-        model: 'gemini-2.5-flash'
-      };
-      partialMetrics.segmentCount = whisperxSegments.segments.length;
-      partialMetrics.speakerCount = whisperxSegments.speakers.length;
-      partialMetrics.termCount = analysis.terms?.length ?? 0;
-      partialMetrics.topicCount = analysis.topics?.length ?? 0;
-      partialMetrics.personCount = analysis.people?.length ?? 0;
-
-      // Check for abort after Gemini analysis
-      await checkAbort(conversationId);
-
-      // Step 3.4: Content-based speaker identification (runs AFTER WhisperX)
-      // This identifies which SPEAKER_XX is which person based on the actual transcript content
-      console.log('[Transcribe] Step 3.4: Identifying speakers from transcript content...');
-      const speakerIdStartTime = Date.now();
-
-      const speakerIdentificationResult = await identifySpeakersFromContent(
-        whisperxSegments.segments,
-        whisperxSegments.speakers,
-        conversationId,
-        userId
-      );
-
-      // Collect labels for billing reconciliation
-      partialMetrics.geminiLabels.push(speakerIdentificationResult.labels);
-
-      const speakerIdDurationMs = Date.now() - speakerIdStartTime;
-      console.log('[Transcribe] Content-based speaker identification complete:', {
-        conversationId,
-        durationMs: speakerIdDurationMs,
-        durationSec: (speakerIdDurationMs / 1000).toFixed(1),
-        speakerNotesFound: speakerIdentificationResult.speakerNotes?.length ?? 0,
-        inputTokens: speakerIdentificationResult.tokenUsage.inputTokens,
-        outputTokens: speakerIdentificationResult.tokenUsage.outputTokens
-      });
-
-      // Override analysis.speakerNotes with content-based identification
-      // This ensures merge uses the CORRECT SPEAKER_XX -> name mapping
-      if (speakerIdentificationResult.speakerNotes && speakerIdentificationResult.speakerNotes.length > 0) {
-        analysis.speakerNotes = speakerIdentificationResult.speakerNotes;
-        console.log('[Transcribe] Using content-based speaker identification (overriding pre-analysis)');
-      } else {
-        console.warn('[Transcribe] Content-based identification returned no speaker notes, using pre-analysis fallback');
-      }
-
-      // Update metrics for speaker identification
-      partialMetrics.llmUsage.geminiAnalysis.inputTokens += speakerIdentificationResult.tokenUsage.inputTokens;
-      partialMetrics.llmUsage.geminiAnalysis.outputTokens += speakerIdentificationResult.tokenUsage.outputTokens;
-
-      // Step 3.5: Speaker reassignment pass (reassign only, no splits/timestamp changes)
-      await progressManager.setStep(ProcessingStep.REASSIGNING);
-      console.log('[Transcribe] Step 3.5: Identifying speaker reassignments...');
-      const speakerCorrectionStartTime = Date.now();
-
-      const correctionResult = await identifySpeakerReassignments(
-        whisperxSegments.segments,
-        whisperxSegments.speakers,
-        conversationId,
-        userId
-      );
-      const { corrections: speakerCorrections, tokenUsage: geminiCorrectionTokens } = correctionResult;
-
-      // Collect labels for billing reconciliation
-      partialMetrics.geminiLabels.push(correctionResult.labels);
-
-      const speakerCorrectionDurationMs = Date.now() - speakerCorrectionStartTime;
-      console.log('[Transcribe] Speaker reassignment analysis complete:', {
-        conversationId,
-        durationMs: speakerCorrectionDurationMs,
-        durationSec: (speakerCorrectionDurationMs / 1000).toFixed(1),
-        correctionCount: speakerCorrections.length,
-        inputTokens: geminiCorrectionTokens.inputTokens,
-        outputTokens: geminiCorrectionTokens.outputTokens
-      });
-
-      // Update partial metrics after speaker correction
-      partialMetrics.timingMs.speakerCorrection = speakerCorrectionDurationMs;
-      partialMetrics.llmUsage.geminiSpeakerCorrection = {
-        inputTokens: geminiCorrectionTokens.inputTokens,
-        outputTokens: geminiCorrectionTokens.outputTokens,
-        model: 'gemini-2.5-flash'
-      };
-      partialMetrics.speakerCorrectionsApplied = speakerCorrections.length;
-
-      // Apply speaker reassignments (no timestamp manipulation)
-      if (speakerCorrections.length > 0) {
-        whisperxSegments.segments = applySpeakerReassignments(
-          whisperxSegments.segments,
-          speakerCorrections,
-          whisperxSegments.speakers.map(s => s.id)
-        );
-      }
-
-      // Update progress: finalizing
-      await progressManager.setStep(ProcessingStep.FINALIZING);
-
-      // Step 4: Transform to our data model (merge WhisperX + Gemini)
-      console.debug('[Transcribe] Step 4: Merging WhisperX and Gemini data...');
-      const transformStartTime = Date.now();
-
-      const processedData = mergeWhisperXAndGeminiData(
-        whisperxSegments,
-        analysis,
-        conversationId,
-        userId
-      );
-
-      const transformDurationMs = Date.now() - transformStartTime;
-      console.debug('[Transcribe] Transform complete:', {
-        transformDurationMs,
-        finalSegmentCount: processedData.segments.length,
-        termOccurrenceCount: processedData.termOccurrences.length,
-        durationMs: processedData.durationMs
-      });
-
-      // Check for abort before final save
-      await checkAbort(conversationId);
-
-      // Determine alignment status based on transcription source
-      const finalAlignmentStatus = usedGeminiFallback ? 'fallback' : 'aligned';
-
-      // Save results to Firestore (with retry for transient failures)
-      console.debug('[Transcribe] Saving results to Firestore...');
-      const firestoreStartTime = Date.now();
-      await retryWithBackoff(
-        () => db.collection('conversations').doc(conversationId).update({
-          ...processedData,
-          status: 'complete',
-          alignmentStatus: finalAlignmentStatus,
-          alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
-          abortRequested: false,  // Clear any abort flag
-          audioStoragePath: filePath,
+      }, { merge: true });
+
+      // In emulator mode, skip Cloud Tasks entirely and process directly
+      // Cloud Tasks has no emulator and can't call localhost endpoints
+      const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true';
+
+      if (isEmulator) {
+        console.log('[Transcribe] 🧪 Emulator detected - processing directly (bypassing Cloud Tasks)');
+
+        // Update to processing status (mimics what processTranscription would do)
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'processing',
+          processingStartedAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp()
-        }),
-        'Firestore save results'
-      );
-      const firestoreDurationMs = Date.now() - firestoreStartTime;
+        });
 
-      const totalDurationMs = Date.now() - downloadStartTime;
-      console.log('[Transcribe] ✅ Transcription complete (NEW ARCHITECTURE):', {
-        conversationId,
-        segmentCount: processedData.segments.length,
-        speakerCount: Object.keys(processedData.speakers).length,
-        termCount: Object.keys(processedData.terms).length,
-        topicCount: processedData.topics.length,
-        personCount: processedData.people.length,
-        alignmentStatus: finalAlignmentStatus,
-        usedGeminiFallback,
-        speakerCorrectionsApplied: speakerCorrections.length,
-        timingMs: {
-          download: downloadDurationMs,
-          whisperx: whisperxDurationMs,
-          buildSegments: buildDurationMs,
-          gemini: geminiDurationMs,
-          speakerCorrection: speakerCorrectionDurationMs,
-          transform: transformDurationMs,
-          firestore: firestoreDurationMs,
-          total: totalDurationMs
+        // Call the pipeline directly - same as processTranscription would
+        // Pipeline handles its own error states and Firestore updates
+        await executeTranscriptionPipeline({
+          conversationId,
+          userId,
+          filePath,
+          replicateApiToken: replicateApiToken.value(),
+          huggingfaceAccessToken: huggingfaceAccessToken.value(),
+          audioSizeBytes: event.data.size
+        });
+
+        console.log('[Transcribe] ✅ Direct processing complete:', { conversationId });
+      } else {
+        // Production: Enqueue Cloud Task for heavy processing
+        // This allows the storage trigger to complete quickly (within 540s limit)
+        // while the actual processing runs in an HTTP function with 60-minute timeout
+        const { CloudTasksClient } = await import('@google-cloud/tasks');
+        const tasksClient = new CloudTasksClient();
+
+        // Get project ID from environment
+        const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+        if (!project) {
+          throw new Error('GCP project ID not found in environment');
         }
-      });
 
-      // Build LLM usage breakdown for cost tracking
-      const llmUsage: LLMUsage = {
-        geminiAnalysis: geminiAnalysisTokens,
-        geminiSpeakerCorrection: geminiCorrectionTokens,
-        whisperx: {
-          // Use wall clock time as approximation for Replicate compute time
-          // (actual billing uses their internal compute time which is close)
-          computeTimeSeconds: whisperxDurationMs / 1000,
-          model: 'whisperx',
-          // Prediction ID from robust method (for billing traceability)
-          predictionId: whisperxPredictionId
-        }
-        // diarization is built into whisperx model now, no separate call
-      };
+        // Build queue path
+        const location = 'us-central1';
+        const queue = 'transcription-queue';
+        const parent = tasksClient.queuePath(project, location, queue);
 
-      // Calculate estimated costs based on pricing from database
-      // Returns both cost breakdown and pricing snapshot for audit trail
-      const costResult = await calculateCost(llmUsage);
+        // Build HTTP request URL for processTranscription function
+        // Format: https://{location}-{project}.cloudfunctions.net/{functionName}
+        const functionName = 'processTranscription';
+        const processTranscriptionUrl = `https://${location}-${project}.cloudfunctions.net/${functionName}`;
 
-      console.log('[Transcribe] LLM usage and cost breakdown:', {
-        conversationId,
-        geminiAnalysisTokens: geminiAnalysisTokens.inputTokens + geminiAnalysisTokens.outputTokens,
-        geminiCorrectionTokens: geminiCorrectionTokens.inputTokens + geminiCorrectionTokens.outputTokens,
-        whisperxComputeSec: llmUsage.whisperx.computeTimeSeconds.toFixed(1),
-        estimatedCostUsd: costResult.estimatedCost.totalUsd.toFixed(6),
-        pricingSnapshot: {
-          geminiPricingId: costResult.pricingSnapshot.geminiPricingId,
-          whisperxPricingId: costResult.pricingSnapshot.whisperxPricingId
-        }
-      });
+        // Build task payload
+        const payload = {
+          conversationId,
+          userId,
+          filePath
+        };
 
-      // Record metrics for observability dashboard (includes pricing snapshot for billing reconciliation)
-      await recordMetrics({
-        conversationId,
-        userId,
-        status: 'success',
-        alignmentStatus: finalAlignmentStatus,
-        timingMs: {
-          download: downloadDurationMs,
-          whisperx: whisperxDurationMs,
-          buildSegments: buildDurationMs,
-          gemini: geminiDurationMs,
-          speakerCorrection: speakerCorrectionDurationMs,
-          transform: transformDurationMs,
-          firestore: firestoreDurationMs,
-          total: totalDurationMs
-        },
-        segmentCount: processedData.segments.length,
-        speakerCount: Object.keys(processedData.speakers).length,
-        termCount: Object.keys(processedData.terms).length,
-        topicCount: processedData.topics.length,
-        personCount: processedData.people.length,
-        speakerCorrectionsApplied: speakerCorrections.length,
-        audioSizeMB: audioBuffer.length / (1024 * 1024),
-        durationMs: processedData.durationMs,
-        llmUsage,
-        geminiLabels: partialMetrics.geminiLabels,  // Billing labels for cost attribution
-        estimatedCost: costResult.estimatedCost,
-        pricingSnapshot: costResult.pricingSnapshot
-      });
+        // Create Cloud Task
+        const task = {
+          httpRequest: {
+            httpMethod: 'POST' as const,
+            url: processTranscriptionUrl,
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+            oidcToken: {
+              serviceAccountEmail: `${project}@appspot.gserviceaccount.com`
+            }
+          },
+          scheduleTime: {
+            seconds: Math.floor(Date.now() / 1000) + 5  // Schedule 5 seconds from now (avoid race conditions)
+          }
+        };
 
-      // Record processing_completed event for user stats
-      await recordUserEvent({
-        eventType: 'processing_completed',
-        userId,
-        conversationId,
-        metadata: {
-          durationMs: processedData.durationMs,
-          estimatedCostUsd: costResult.estimatedCost.totalUsd,
-          segmentCount: processedData.segments.length
-        }
-      });
+        console.log('[Transcribe] Creating Cloud Task:', {
+          conversationId,
+          queue: `${location}/${queue}`,
+          targetUrl: processTranscriptionUrl,
+          scheduleDelaySeconds: 5
+        });
 
-      // Mark processing as complete
-      await progressManager.setComplete();
+        const [createdTask] = await tasksClient.createTask({ parent, task });
+
+        console.log('[Transcribe] ✅ Task enqueued successfully:', {
+          conversationId,
+          taskName: createdTask.name,
+          scheduleTime: createdTask.scheduleTime
+        });
+      }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      const isAbort = error instanceof AbortRequestedError;
 
-      if (isAbort) {
-        // Handle abort - record partial metrics since we still consumed resources
-        console.log('[Transcribe] ⏹️ Processing aborted by user:', { conversationId });
-
-        // Calculate total time elapsed
-        partialMetrics.timingMs.total = Date.now() - partialMetrics.processStartTime;
-
-        // Calculate estimated cost from whatever LLM resources were consumed
-        const partialCostResult = await calculateCost(partialMetrics.llmUsage);
-
-        console.log('[Transcribe] Recording partial metrics on abort:', {
-          conversationId,
-          elapsedMs: partialMetrics.timingMs.total,
-          whisperxTime: partialMetrics.llmUsage.whisperx.computeTimeSeconds,
-          geminiInputTokens: partialMetrics.llmUsage.geminiAnalysis.inputTokens,
-          estimatedCostUsd: partialCostResult.estimatedCost.totalUsd
-        });
-
-        // Record metrics for observability - aborted jobs still cost money!
-        await recordMetrics({
-          conversationId,
-          userId,
-          status: 'aborted',
-          errorMessage: 'Processing was cancelled by user',
-          timingMs: partialMetrics.timingMs,
-          segmentCount: partialMetrics.segmentCount,
-          speakerCount: partialMetrics.speakerCount,
-          termCount: partialMetrics.termCount,
-          topicCount: partialMetrics.topicCount,
-          personCount: partialMetrics.personCount,
-          speakerCorrectionsApplied: partialMetrics.speakerCorrectionsApplied,
-          audioSizeMB: partialMetrics.audioSizeMB,
-          durationMs: partialMetrics.durationMs,
-          llmUsage: partialMetrics.llmUsage,
-          geminiLabels: partialMetrics.geminiLabels,  // Billing labels for cost attribution
-          estimatedCost: partialCostResult.estimatedCost,
-          pricingSnapshot: partialCostResult.pricingSnapshot
-        });
-
-        // Record processing_aborted event for user stats
-        await recordUserEvent({
-          eventType: 'processing_aborted',
-          userId,
-          conversationId,
-          metadata: {
-            estimatedCostUsd: partialCostResult.estimatedCost.totalUsd,
-            elapsedMs: partialMetrics.timingMs.total
-          }
-        });
-
-        await db.collection('conversations').doc(conversationId).update({
-          status: 'aborted',
-          processingError: 'Processing was cancelled by user',
-          abortRequested: false,  // Clear the flag
-          updatedAt: FieldValue.serverTimestamp()
-        });
-
-        await progressManager.setFailed('Aborted by user');
-        return;
-      }
-
-      console.error('[Transcribe] ❌ Transcription failed:', {
+      console.error('[Transcribe] ❌ Failed to enqueue task:', {
         conversationId,
         errorType: error instanceof Error ? error.constructor.name : typeof error,
         errorMessage,
         errorStack: error instanceof Error ? error.stack : undefined
       });
 
-      // Record failure metrics for observability dashboard
-      await recordMetrics({
-        conversationId,
-        userId,
+      // Update Firestore to mark as failed
+      await db.collection('conversations').doc(conversationId).update({
         status: 'failed',
-        errorMessage,
-        timingMs: {
-          download: 0,
-          whisperx: 0,
-          buildSegments: 0,
-          gemini: 0,
-          speakerCorrection: 0,
-          transform: 0,
-          firestore: 0,
-          total: 0
-        },
-        segmentCount: 0,
-        speakerCount: 0,
-        termCount: 0,
-        topicCount: 0,
-        personCount: 0,
-        speakerCorrectionsApplied: 0,
-        audioSizeMB: 0,
-        durationMs: 0
+        processingError: `Failed to enqueue processing task: ${errorMessage}`,
+        updatedAt: FieldValue.serverTimestamp()
       });
 
-      // Record processing_failed event for user stats
+      // Record failure event
       await recordUserEvent({
         eventType: 'processing_failed',
         userId,
         conversationId,
         metadata: {
-          errorMessage
+          errorMessage: `Enqueue failed: ${errorMessage}`
         }
       });
-
-      // Mark processing as failed
-      await progressManager.setFailed(errorMessage);
-
-      // Update status to failed
-      await db.collection('conversations').doc(conversationId).update({
-        status: 'failed',
-        processingError: errorMessage,
-        updatedAt: FieldValue.serverTimestamp()
-      });
-
-      console.debug('[Transcribe] Firestore updated with failed status');
     }
   }
 );
 
-/**
- * Map topic approximate times (from Gemini pre-analysis) to segment indices.
- *
- * Gemini pre-analysis returns topics with approximate start/end times in seconds.
- * We need to map these to segment indices based on WhisperX timestamps.
- */
+
 function mapTopicTimesToSegmentIndices(
   topics: Array<GeminiAnalysis['topics'][0] & { _startApproxSeconds?: number; _endApproxSeconds?: number }>,
   segments: Array<{ startMs: number; endMs: number; index: number }>

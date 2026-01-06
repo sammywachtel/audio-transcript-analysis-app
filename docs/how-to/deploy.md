@@ -100,6 +100,7 @@ These secrets are stored in Firebase Secret Manager, not GitHub:
 |--------|-------------|---------------|
 | `GEMINI_API_KEY` | Gemini API key (create in GCP project) | `npx firebase functions:secrets:set GEMINI_API_KEY` |
 | `REPLICATE_API_TOKEN` | Replicate API token for WhisperX | `npx firebase functions:secrets:set REPLICATE_API_TOKEN` |
+| `HUGGINGFACE_ACCESS_TOKEN` | HuggingFace token for diarization | `npx firebase functions:secrets:set HUGGINGFACE_ACCESS_TOKEN` |
 
 **Important:** The setup script (`gcp-setup.sh`) can create the Gemini API key automatically within your project. If setting manually:
 
@@ -127,6 +128,71 @@ firebase apps:sdkconfig WEB --project=your-project-id
 | Secret | Description |
 |--------|-------------|
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase service account JSON |
+
+## Cloud Tasks Queue Setup (One-Time)
+
+The app uses Cloud Tasks to handle long-running audio transcription jobs. The `transcribeAudio` storage trigger enqueues tasks, and the `processTranscription` HTTP function processes them with a 60-minute timeout.
+
+### Create the Queue
+
+```bash
+PROJECT_ID="your-project-id"
+
+# Create the transcription queue
+gcloud tasks queues create transcription-queue \
+  --location=us-central1 \
+  --max-dispatches-per-second=10 \
+  --max-concurrent-dispatches=5 \
+  --max-attempts=3 \
+  --min-backoff=60s \
+  --max-backoff=600s \
+  --project=$PROJECT_ID
+```
+
+**Queue Configuration Explained:**
+- `max-dispatches-per-second=10`: Rate limit to avoid overwhelming the processing function
+- `max-concurrent-dispatches=5`: Max parallel transcriptions (balance resource usage)
+- `max-attempts=3`: Retry failed tasks up to 3 times
+- `min-backoff=60s`: Wait at least 1 minute before first retry
+- `max-backoff=600s`: Wait at most 10 minutes between retries
+
+### Verify Queue IAM
+
+The App Engine default service account needs permission to create tasks and invoke the HTTP function:
+
+```bash
+PROJECT_ID="your-project-id"
+
+# Grant Cloud Tasks Enqueuer role (usually automatic)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_ID}@appspot.gserviceaccount.com" \
+  --role="roles/cloudtasks.enqueuer"
+
+# Grant Cloud Functions Invoker role for processTranscription
+gcloud functions add-iam-policy-binding processTranscription \
+  --project=$PROJECT_ID \
+  --region=us-central1 \
+  --member="serviceAccount:${PROJECT_ID}@appspot.gserviceaccount.com" \
+  --role="roles/cloudfunctions.invoker"
+```
+
+### Monitor Queue Status
+
+```bash
+# List queues
+gcloud tasks queues list --location=us-central1 --project=$PROJECT_ID
+
+# Describe queue (shows config and stats)
+gcloud tasks queues describe transcription-queue \
+  --location=us-central1 \
+  --project=$PROJECT_ID
+
+# List tasks in queue (if any are pending)
+gcloud tasks list \
+  --queue=transcription-queue \
+  --location=us-central1 \
+  --project=$PROJECT_ID
+```
 
 ## Workload Identity Federation Setup
 

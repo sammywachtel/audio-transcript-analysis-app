@@ -45,20 +45,57 @@ function compensateDrift(segments, audioDuration) {
 
 This leverages the existing drift detection code but applies it more aggressively.
 
-### Phase 2: WhisperX via Replicate API (Integrated into Firebase Functions)
-**Status**: ✅ Complete (Consolidated)
+### Phase 2: WhisperX via Replicate API (Queue-Driven Architecture)
+**Status**: ✅ Complete (Queue-Driven)
 **Effort**: 14-21 hours initial, then consolidated into Functions
 **Accuracy Target**: <1 second (~50ms with forced alignment)
 
-Architecture (Current - Consolidated):
+Architecture (Current - Two-Stage Queue-Driven):
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  React Client   │────▶│ Firebase Cloud   │────▶│  Replicate API  │
-│                 │◀────│ Functions        │◀────│  (WhisperX)     │
-│                 │     │ (transcribeAudio)│     │                 │
-│                 │     │  └─alignment.ts  │     │                 │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌──────────────────────────────────────────────┐
+│  React Client   │────▶│            Firebase Cloud Functions          │
+│                 │     │                                              │
+│                 │     │  ┌────────────────┐    ┌──────────────────┐  │
+│                 │     │  │ transcribeAudio│    │Cloud Tasks Queue │  │
+│                 │     │  │ (Storage Trig) │───▶│transcription-    │  │
+│                 │     │  │  - validate    │    │queue             │  │
+│                 │     │  │  - enqueue     │    └────────┬─────────┘  │
+│                 │◀────│  │  - 540s max    │             │            │
+│                 │     │  └────────────────┘             ▼            │
+│                 │     │                       ┌──────────────────┐   │
+│                 │     │                       │processTranscript │   │
+│                 │     │                       │ (HTTP Function)  │   │
+│                 │     │                       │  - 3600s timeout │   │
+│                 │     │                       │  - 1GiB memory   │   │
+│                 │     │                       │  - invoker:private│  │
+│                 │     │                       └────────┬─────────┘   │
+│                 │     └────────────────────────────────┼─────────────┘
+│                 │                                      │
+└─────────────────┘                                      ▼
+                                                ┌─────────────────┐
+                                                │  Replicate API  │
+                                                │  (WhisperX)     │
+                                                └─────────────────┘
 ```
+
+**Why Queue-Driven Architecture?**
+- Storage triggers have a hard 540s (9 minute) timeout limit—even 2nd gen Cloud Functions can't exceed this for event-driven triggers
+- Large audio files (46MB+) can take 10-15+ minutes to process with Gemini + WhisperX
+- HTTP functions can have up to 3600s (60 minute) timeout
+- Cloud Tasks provides automatic retry with exponential backoff on failures
+
+**Two-Stage Flow:**
+1. **transcribeAudio (Storage Trigger)**: Lightweight validation and enqueue (~5 seconds)
+   - Validates the uploaded audio file
+   - Updates Firestore status to `queued` with `queuedAt` timestamp
+   - Enqueues a Cloud Task with conversation payload
+   - Completes within 540s timeout limit
+
+2. **processTranscription (HTTP Function)**: Heavy processing (up to 60 minutes)
+   - Invoked by Cloud Tasks with OIDC authentication
+   - Updates status to `processing` with `processingStartedAt`
+   - Downloads audio, calls Gemini + WhisperX, saves results
+   - Returns 200 on success (no retry) or 500 on failure (triggers retry)
 
 **Why WhisperX over OpenAI Whisper API?**
 - OpenAI's API has word-level timestamps but they can still drift on long-form audio

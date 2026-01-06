@@ -25,13 +25,20 @@ interface ConversationDoc {
   durationMs: number;
   audioStoragePath: string; // Firebase Storage path
 
-  // Processing
-  status: 'processing' | 'complete' | 'failed';
+  // Processing Status (Queue-Driven Architecture)
+  status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
   processingError?: string;
+
+  // Processing Timestamps (Queue-Driven Architecture)
+  queuedAt?: Timestamp;           // When Cloud Task was enqueued
+  processingStartedAt?: Timestamp; // When processTranscription began
 
   // Alignment Status
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;      // Reason for fallback if applicable
+
+  // Abort Control
+  abortRequested?: boolean;     // User requested processing stop
 
   // Analysis Results
   speakers: Record<string, Speaker>;
@@ -42,6 +49,17 @@ interface ConversationDoc {
   people: Person[];
 }
 ```
+
+**Processing Status Flow:**
+1. `queued` - Audio uploaded, Cloud Task enqueued (set by `transcribeAudio`)
+2. `processing` - Heavy processing started (set by `processTranscription`)
+3. `complete` - Processing succeeded
+4. `failed` - Processing failed (may retry via Cloud Tasks)
+5. `aborted` - User cancelled processing
+
+**New Timestamps:**
+- `queuedAt` - Set when `transcribeAudio` enqueues the Cloud Task
+- `processingStartedAt` - Set when `processTranscription` begins actual processing
 
 #### conversations/{conversationId}/chatHistory (subcollection)
 
@@ -447,9 +465,11 @@ interface Conversation {
   updatedAt: string;          // ISO timestamp
   durationMs: number;
   audioUrl?: string;          // Temporary signed URL
-  status: 'processing' | 'complete' | 'failed';
+  status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;    // Reason for fallback
+  queuedAt?: string;          // ISO timestamp when Cloud Task enqueued
+  processingStartedAt?: string; // ISO timestamp when processing began
   speakers: Record<string, Speaker>;
   segments: Segment[];
   terms: Record<string, Term>;

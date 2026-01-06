@@ -279,6 +279,8 @@ APIS=(
     "generativelanguage.googleapis.com"
     "aiplatform.googleapis.com"  # Required for Vertex AI SDK (Gemini with billing labels)
     "apikeys.googleapis.com"
+    # Cloud Tasks (queue-driven transcription architecture)
+    "cloudtasks.googleapis.com"
 )
 
 APIS_TO_ENABLE=()
@@ -433,7 +435,41 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 10: Initialize Firebase Storage and Configure Bucket Access
+# Step 10: Create Cloud Tasks Queue for Transcription
+# -----------------------------------------------------------------------------
+
+log_step "Creating Cloud Tasks queue for transcription..."
+
+QUEUE_NAME="transcription-queue"
+QUEUE_LOCATION="$REGION"
+
+# Check if queue already exists
+if gcloud tasks queues describe "$QUEUE_NAME" \
+    --location="$QUEUE_LOCATION" \
+    --project="$PROJECT_ID" &>/dev/null; then
+    log_skip "Cloud Tasks queue '$QUEUE_NAME' already exists"
+else
+    gcloud tasks queues create "$QUEUE_NAME" \
+        --location="$QUEUE_LOCATION" \
+        --max-dispatches-per-second=10 \
+        --max-concurrent-dispatches=5 \
+        --max-attempts=3 \
+        --min-backoff=60s \
+        --max-backoff=600s \
+        --project="$PROJECT_ID"
+    log_success "Created Cloud Tasks queue: $QUEUE_NAME"
+fi
+
+# Grant Cloud Tasks Enqueuer role to the runtime service account
+# (needed for transcribeAudio to enqueue tasks)
+if sa_exists "$RUNTIME_SA"; then
+    add_iam_binding "serviceAccount:$RUNTIME_SA" "roles/cloudtasks.enqueuer" "$RUNTIME_SA → Cloud Tasks Enqueuer"
+else
+    log_info "Cloud Tasks Enqueuer binding - skipped (runtime SA not yet created)"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 11: Initialize Firebase Storage and Configure Bucket Access
 # -----------------------------------------------------------------------------
 
 log_step "Initializing Firebase Storage..."
@@ -515,7 +551,7 @@ if [[ -n "$BUCKET" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Step 11: Configure Functions Artifact Cleanup Policy
+# Step 12: Configure Functions Artifact Cleanup Policy
 # -----------------------------------------------------------------------------
 
 log_step "Configuring Functions artifact cleanup policy..."
@@ -530,7 +566,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 12: Set Up Workload Identity Federation for Cloud Run (GitHub Actions)
+# Step 13: Set Up Workload Identity Federation for Cloud Run (GitHub Actions)
 # -----------------------------------------------------------------------------
 
 log_step "Workload Identity Federation for Cloud Run..."
@@ -633,7 +669,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 13: Create Service Account Key for Firebase Deployment
+# Step 14: Create Service Account Key for Firebase Deployment
 # -----------------------------------------------------------------------------
 
 log_step "Service account key for Firebase CI/CD..."
@@ -660,7 +696,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 14: Create Gemini API Key and Secret
+# Step 15: Create Gemini API Key and Secret
 # -----------------------------------------------------------------------------
 
 log_step "Gemini API key and secret..."
@@ -729,7 +765,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 15: Enable Firebase Authentication
+# Step 16: Enable Firebase Authentication
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Authentication..."
@@ -749,7 +785,7 @@ log_info "    Use Firebase Console → Authentication → Settings → Authorize
 log_info ""
 
 # -----------------------------------------------------------------------------
-# Step 16: Register Web App
+# Step 17: Register Web App
 # -----------------------------------------------------------------------------
 
 log_step "Firebase Web App..."
