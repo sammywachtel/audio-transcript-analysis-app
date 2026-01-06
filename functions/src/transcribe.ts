@@ -36,11 +36,11 @@ const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');  // For
 // =============================================================================
 
 /**
- * Timeout for Gemini API requests (10 minutes).
- * Large audio files (46MB+) need extra time for upload and processing.
- * The default undici timeout (~5min) is insufficient for these payloads.
+ * Timeout for Gemini API requests (20 minutes).
+ * Large audio files (46MB+) need substantial time for upload and processing.
+ * Google may take 10-15+ minutes to process a 46MB audio file before responding.
  */
-const GEMINI_REQUEST_TIMEOUT_MS = 600_000;
+const GEMINI_REQUEST_TIMEOUT_MS = 1_200_000;
 
 /**
  * Create a Vertex AI client for Gemini API calls.

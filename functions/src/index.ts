@@ -17,11 +17,11 @@
 // Node.js uses undici as the default fetch implementation. Its default
 // headersTimeout (5 minutes) is too short for large audio files sent to
 // Gemini API - Google may take >5 min to start responding for 46MB+ files.
-// We extend this to 15 minutes to prevent HeadersTimeoutError.
+// We extend this to 25 minutes to prevent HeadersTimeoutError.
 import { Agent, setGlobalDispatcher } from 'undici';
 
-const UNDICI_HEADERS_TIMEOUT_MS = 900_000;  // 15 minutes
-const UNDICI_BODY_TIMEOUT_MS = 900_000;     // 15 minutes
+const UNDICI_HEADERS_TIMEOUT_MS = 1_500_000;  // 25 minutes
+const UNDICI_BODY_TIMEOUT_MS = 1_500_000;     // 25 minutes
 
 const agent = new Agent({
   headersTimeout: UNDICI_HEADERS_TIMEOUT_MS,
