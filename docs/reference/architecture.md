@@ -41,14 +41,28 @@ Technical architecture of the Audio Transcript Analysis App.
 │  │  ┌────────────────────┐  ┌────────────────────────┐       │   │
 │  │  │  transcribeAudio   │  │    getAudioUrl         │       │   │
 │  │  │  (Storage trigger) │  │  (HTTPS callable)      │       │   │
-│  │  │                    │  └────────────────────────┘       │   │
-│  │  │  ┌──────────────┐  │  ┌────────────────────────┐       │   │
-│  │  │  │  alignment   │  │  │ chatWithConversation  │       │   │
-│  │  │  │  module      │  │  │  (HTTPS callable)      │       │   │
-│  │  │  └──────────────┘  │  └────────────────────────┘       │   │
-│  │  └─────────┬──────────┘            │                      │   │
-│  │            │                       │                      │   │
-│  └────────────┼───────────────────────┼──────────────────────┘   │
+│  │  │  - validates file  │  └────────────────────────┘       │   │
+│  │  │  - enqueues task   │  ┌────────────────────────┐       │   │
+│  │  │  - 540s timeout    │  │ chatWithConversation  │       │   │
+│  │  └─────────┬──────────┘  │  (HTTPS callable)      │       │   │
+│  │            │             └────────────────────────┘       │   │
+│  │            ▼                                              │   │
+│  │  ┌────────────────────┐                                   │   │
+│  │  │ Cloud Tasks Queue  │                                   │   │
+│  │  │ transcription-queue│                                   │   │
+│  │  └─────────┬──────────┘                                   │   │
+│  │            ▼                                              │   │
+│  │  ┌────────────────────────────────────────────────────┐   │   │
+│  │  │  processTranscription (HTTP Function, private)     │   │   │
+│  │  │  - 3600s timeout (60 min for large files)          │   │   │
+│  │  │  - 1GiB memory                                      │   │   │
+│  │  │  ┌──────────────┐                                   │   │   │
+│  │  │  │  alignment   │                                   │   │   │
+│  │  │  │  module      │                                   │   │   │
+│  │  │  └──────────────┘                                   │   │   │
+│  │  └─────────┬──────────────────────────────────────────┘   │   │
+│  │            │                                              │   │
+│  └────────────┼──────────────────────────────────────────────┘   │
 │               │                                                  │
 └───────────────┼──────────────────────────────────────────────────┘
                 │
@@ -177,7 +191,7 @@ audio-transcript-analysis-app/
 
 ## Data Flow
 
-### Upload Flow
+### Upload Flow (Queue-Driven Architecture)
 
 ```
 1. User selects audio file
@@ -188,20 +202,36 @@ audio-transcript-analysis-app/
 3. Frontend creates Firestore doc (status: 'processing', alignmentStatus: 'pending')
    firestoreService.save(conversation)
         ↓
-4. Storage trigger fires Cloud Function
+4. Storage trigger fires transcribeAudio (lightweight)
    onObjectFinalized → transcribeAudio()
         ↓
-5. Function downloads audio, calls Gemini API for transcription
+5. transcribeAudio validates upload and enqueues Cloud Task
+   ├── Updates Firestore: status='queued', queuedAt=timestamp
+   └── Creates task in 'transcription-queue'
         ↓
-6. Function calls WhisperX alignment service for precise timestamps
+6. Cloud Tasks invokes processTranscription (HTTP function, 60-min timeout)
+   ├── Updates Firestore: status='processing', processingStartedAt=timestamp
+   └── Downloads audio from Storage
+        ↓
+7. processTranscription calls Gemini API for pre-analysis and content extraction
+        ↓
+8. processTranscription calls WhisperX for transcription + alignment
    ├── Success → alignmentStatus: 'aligned'
-   └── Failure → alignmentStatus: 'fallback' (keeps Gemini timestamps)
+   └── Failure → alignmentStatus: 'fallback' (uses Gemini transcription)
         ↓
-7. Function writes results to Firestore (status: 'complete')
+9. processTranscription writes results to Firestore (status: 'complete')
+   ├── Success → Returns 200 (no Cloud Tasks retry)
+   └── Failure → Returns 500 (Cloud Tasks retries with backoff)
         ↓
-8. Real-time listener updates UI
-   onSnapshot → setConversations()
+10. Real-time listener updates UI
+    onSnapshot → setConversations()
 ```
+
+**Why Two-Stage Architecture?**
+- Storage triggers have a hard 540s (9-minute) timeout limit
+- Large audio files (46MB+) need 10-15+ minutes for Gemini + WhisperX processing
+- HTTP functions can have up to 3600s (60-minute) timeout
+- Cloud Tasks handles retries automatically with exponential backoff
 
 ### Alignment Module (HARDY Algorithm)
 

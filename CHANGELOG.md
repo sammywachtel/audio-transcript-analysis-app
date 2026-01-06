@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Queue-Driven Transcription Architecture** - Large audio files (46MB+) now process reliably without timeouts
+  - Storage trigger (`transcribeAudio`) now acts as lightweight enqueuer (< 5 seconds), setting status to `queued`
+  - New HTTP function (`processTranscription`) handles heavy processing with 60-minute timeout
+  - Cloud Tasks provides automatic retry with exponential backoff on failures
+  - Emulator bypass allows local development without Cloud Tasks infrastructure
+  - **Breaking:** Requires one-time Cloud Tasks queue setup (`transcription-queue`) - see `docs/how-to/deploy.md`
+
 ### Fixed
-- **Large File Upload Timeouts** - Audio files now process more reliably
-  - Node.js undici `headersTimeout` extended to 25 minutes (fixes root cause of `HeadersTimeoutError`)
-  - Gemini API calls configured with 20-minute SDK-level timeout as additional safeguard
+- **Large File Upload Timeouts** - Root cause addressed via queue architecture (above)
+  - Node.js undici `headersTimeout` extended to 25 minutes (fixes `HeadersTimeoutError`)
+  - Gemini API calls configured with 20-minute SDK-level timeout
   - Replicate API calls configured with 3-minute timeout via custom fetch wrapper
   - Gateway errors (502/503/504) now trigger automatic retries in WhisperX transcription
-  - Note: Storage-triggered functions limited to 9 minutes by GCP; very large files may still timeout
+- **Firestore Race Condition** - Storage trigger now uses `set()` with merge instead of `update()`, preventing errors when file upload completes before frontend creates document
 
 ## [1.8.0-beta] - 2026-01-05
 
