@@ -688,7 +688,7 @@ export const transcribeAudio = onObjectFinalized(
   {
     secrets: [replicateApiToken, huggingfaceAccessToken],
     memory: '1GiB', // Audio processing needs more memory
-    timeoutSeconds: 3600, // 60 minutes (max for 2nd gen functions) - large files need this
+    timeoutSeconds: 540, // 9 minutes (max for event-driven triggers, even 2nd gen)
     region: 'us-central1'
   },
   async (event) => {
