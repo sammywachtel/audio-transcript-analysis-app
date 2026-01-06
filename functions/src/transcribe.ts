@@ -82,7 +82,7 @@ async function checkAbort(conversationId: string): Promise<void> {
 
 /**
  * Retry an operation with exponential backoff.
- * Useful for transient Firestore timeouts (DEADLINE_EXCEEDED).
+ * Handles transient errors: Firestore timeouts, Vertex AI cancellations, etc.
  */
 async function retryWithBackoff<T>(
   operation: () => Promise<T>,
@@ -95,9 +95,20 @@ async function retryWithBackoff<T>(
       return await operation();
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check for retryable errors:
+      // - Firestore: DEADLINE_EXCEEDED, UNAVAILABLE, RESOURCE_EXHAUSTED
+      // - Vertex AI: 499 (Client Closed Request), CANCELLED
+      // - General: 502, 503, 504 gateway errors
       const isRetryable = errorMessage.includes('DEADLINE_EXCEEDED') ||
                           errorMessage.includes('UNAVAILABLE') ||
-                          errorMessage.includes('RESOURCE_EXHAUSTED');
+                          errorMessage.includes('RESOURCE_EXHAUSTED') ||
+                          errorMessage.includes('499') ||
+                          errorMessage.includes('CANCELLED') ||
+                          errorMessage.includes('Client Closed Request') ||
+                          errorMessage.includes('502') ||
+                          errorMessage.includes('503') ||
+                          errorMessage.includes('504');
 
       if (!isRetryable || attempt === maxRetries) {
         console.error(`[Retry] ${operationName} failed after ${attempt} attempts:`, errorMessage);
@@ -619,21 +630,27 @@ Return as JSON with a "segments" array.
     // Build labels for billing attribution
     const labels = buildGeminiLabels(conversationId, userId, 'fallback_transcription');
 
-    const result = await model.generateContent({
-      contents: [
-        { role: 'user', parts: [{ text: prompt }] },
-        {
-          role: 'user',
-          parts: [{
-            inlineData: {
-              mimeType,
-              data: audioBase64
-            }
-          }]
-        }
-      ],
-      labels
-    });
+    // Wrap in retry logic - Vertex AI can return 499 (Client Closed Request) on large files
+    const result = await retryWithBackoff(
+      () => model.generateContent({
+        contents: [
+          { role: 'user', parts: [{ text: prompt }] },
+          {
+            role: 'user',
+            parts: [{
+              inlineData: {
+                mimeType,
+                data: audioBase64
+              }
+            }]
+          }
+        ],
+        labels
+      }),
+      'Gemini Fallback transcription',
+      3,      // maxRetries
+      10000   // 10 second base delay (longer for large file processing)
+    );
 
     const durationMs = Date.now() - startTime;
     // Vertex AI SDK response structure
@@ -1421,6 +1438,10 @@ export const transcribeAudio = onObjectFinalized(
         };
 
         // Create Cloud Task
+        // Note: HTTP targets have max 30-minute dispatchDeadline. For files needing
+        // longer processing, audio chunking (04-02 iteration) splits into smaller pieces.
+        const DISPATCH_DEADLINE_SECONDS = 1800; // 30 minutes (max for HTTP targets)
+
         const task = {
           httpRequest: {
             httpMethod: 'POST' as const,
@@ -1435,6 +1456,9 @@ export const transcribeAudio = onObjectFinalized(
           },
           scheduleTime: {
             seconds: Math.floor(Date.now() / 1000) + 5  // Schedule 5 seconds from now (avoid race conditions)
+          },
+          dispatchDeadline: {
+            seconds: DISPATCH_DEADLINE_SECONDS
           }
         };
 
