@@ -8,12 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Large File Upload Timeouts** - Audio files up to 50MB now process reliably
+- **Large File Upload Timeouts** - Audio files now process more reliably
   - Node.js undici `headersTimeout` extended to 25 minutes (fixes root cause of `HeadersTimeoutError`)
   - Gemini API calls configured with 20-minute SDK-level timeout as additional safeguard
-  - Cloud Function timeout increased from 9 to 60 minutes (fixes 499 Client Closed Request errors)
   - Replicate API calls configured with 3-minute timeout via custom fetch wrapper
   - Gateway errors (502/503/504) now trigger automatic retries in WhisperX transcription
+  - Note: Storage-triggered functions limited to 9 minutes by GCP; very large files may still timeout
 
 ## [1.8.0-beta] - 2026-01-05
 
