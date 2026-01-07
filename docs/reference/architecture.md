@@ -243,6 +243,7 @@ audio-transcript-analysis-app/
 ```
 
 **Why Two-Stage Architecture?**
+
 - Storage triggers have a hard 540s (9-minute) timeout limit
 - Large audio files (46MB+) need 10-15+ minutes for Gemini + WhisperX processing
 - HTTP functions can have up to 3600s (60-minute) timeout
@@ -301,24 +302,26 @@ Each chunk stores metadata for downstream deduplication and merging:
 
 ```typescript
 interface ChunkMetadata {
-  chunkIndex: number;        // Zero-indexed chunk number
-  totalChunks: number;       // Total chunks for this file
-  startMs: number;           // Start time in original audio
-  endMs: number;             // End time in original audio
-  overlapBeforeMs: number;   // Overlap with previous chunk (0 for first)
-  overlapAfterMs: number;    // Overlap with next chunk (0 for last)
-  chunkStoragePath: string;  // Storage path: chunks/{id}/chunk-NNN.ext
+  chunkIndex: number; // Zero-indexed chunk number
+  totalChunks: number; // Total chunks for this file
+  startMs: number; // Start time in original audio
+  endMs: number; // End time in original audio
+  overlapBeforeMs: number; // Overlap with previous chunk (0 for first)
+  overlapAfterMs: number; // Overlap with next chunk (0 for last)
+  chunkStoragePath: string; // Storage path: chunks/{id}/chunk-NNN.ext
   originalStoragePath: string; // Original file path
-  durationMs: number;        // Chunk duration (including overlaps)
+  durationMs: number; // Chunk duration (including overlaps)
 }
 ```
 
 **Key Files:**
+
 - `functions/src/chunking.ts` - Silence detection, chunk boundary calculation, extraction
 - `functions/src/chunkBounds.ts` - Validation helpers, overlap region utilities
 - `@ffmpeg-installer/ffmpeg` - Provides ffmpeg binary for Cloud Functions
 
 **Configuration (CHUNK_CONFIG):**
+
 - `TARGET_DURATION_SECONDS`: 600 (10 min target)
 - `MAX_DURATION_SECONDS`: 900 (15 min max)
 - `MIN_DURATION_SECONDS`: 120 (2 min floor)
@@ -328,11 +331,133 @@ interface ChunkMetadata {
 - `SILENCE_MIN_DURATION`: 0.5s
 
 **Benefits:**
+
 - Files of any length can be processed (no timeout issues)
 - Each chunk fits comfortably in 30-minute Cloud Task timeout
 - Silence-based splits prevent mid-word truncation
 - Overlap ensures transcript continuity at boundaries
 - Parallel processing possible with staggered task scheduling
+
+### Chunk Context and Resumable Execution
+
+For long audio files processed in chunks, the system maintains context between chunks to ensure:
+
+1. **Speaker continuity** - The same person keeps the same speaker ID across all chunks
+2. **Metadata deduplication** - Terms, topics, and people aren't duplicated across chunks
+3. **Resumable execution** - Failed chunks can be retried without reprocessing successful ones
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                   Chunk Context State Machine                             │
+│                                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  transcribeAudio (Storage Trigger)                                   │ │
+│  │  ├── Initializes chunkStatuses: all 'pending'                       │ │
+│  │  ├── Creates empty chunkContexts array                              │ │
+│  │  └── Enqueues Cloud Task per chunk (staggered)                      │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                              │                                            │
+│                              ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  processTranscription (Cloud Task Handler)                          │ │
+│  │                                                                      │ │
+│  │  For each chunk:                                                     │ │
+│  │  1. Load ChunkContext from previous chunk (or initial for chunk 0)  │ │
+│  │  2. Mark chunk status → 'processing'                                │ │
+│  │  3. Execute transcription pipeline with context                      │ │
+│  │  4. Build nextContext with speaker mappings, metadata IDs            │ │
+│  │  5. Mark chunk status → 'complete', save nextContext                 │ │
+│  │     (or → 'failed' with error on failure)                           │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                              │                                            │
+│                              ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  Resume Logic (chunkContext.ts)                                      │ │
+│  │  ├── getResumableChunks() → finds pending/failed chunks             │ │
+│  │  ├── Each chunk loads context from last 'complete' predecessor       │ │
+│  │  └── Failed chunks retry with backoff via Cloud Tasks               │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Firestore Schema - `chunkingMetadata` Field:**
+
+```typescript
+// Stored in conversations/{conversationId}.chunkingMetadata
+interface ChunkingMetadata {
+  chunkingEnabled: boolean; // true if file was chunked
+  totalChunks: number; // Total number of chunks
+  completedChunks: number; // Count of 'complete' chunks
+  chunkStatuses: ChunkStatus[]; // Per-chunk status tracking
+  chunkContexts: ChunkContext[]; // Per-chunk emitted contexts
+  chunkedAt: string; // ISO timestamp
+  originalDurationMs: number; // Original audio duration
+  originalStoragePath: string; // Path to original file
+}
+
+interface ChunkStatus {
+  chunkIndex: number;
+  status: 'pending' | 'processing' | 'complete' | 'failed';
+  startedAt?: string; // When processing started
+  completedAt?: string; // When processing finished
+  error?: string; // Error message if failed
+  retryCount?: number; // Number of retry attempts
+}
+
+interface ChunkContext {
+  emittedByChunkIndex: number; // Which chunk created this context
+  speakerMap: SpeakerMapping[]; // Canonical speaker ID mappings
+  previousSummary: string; // Truncated summary (max 512 chars)
+  knownTermIds: string[]; // Term IDs for deduplication
+  knownTopicIds: string[]; // Topic IDs for deduplication
+  knownPersonIds: string[]; // Person IDs for deduplication
+  cumulativeSegmentCount: number; // Total segments so far
+  lastProcessedMs: number; // Last timestamp processed
+}
+
+interface SpeakerMapping {
+  originalId: string; // e.g., "SPEAKER_00"
+  canonicalId: string; // Consistent ID across chunks
+  displayName?: string; // Inferred name if known
+}
+```
+
+**Key Files:**
+
+- `functions/src/chunkContext.ts` - Context loading, status updates, resume helpers
+- `functions/src/processTranscription.ts` - Chunk-aware task handler
+- `functions/src/transcribe.ts` - Initializes chunk statuses on upload
+- `functions/src/types.ts` - ChunkContext, ChunkStatus, ChunkingMetadata types
+
+**Status Transitions:**
+
+```
+pending ──┬──▶ processing ──┬──▶ complete
+          │                 │
+          │                 └──▶ failed ──▶ (retry) ──▶ processing
+          │
+          └──▶ (blocked by predecessor) ──▶ pending (wait)
+```
+
+**Transaction Safety:**
+
+All status and context updates use Firestore transactions to prevent race conditions:
+
+- Multiple chunk tasks may run concurrently
+- `markChunkComplete()` atomically updates status AND increments `completedChunks`
+- `loadChunkContext()` validates predecessor chunk is complete before returning
+
+**Resume Behavior:**
+
+When a chunk fails and Cloud Tasks retries:
+
+1. `loadChunkContext()` checks if previous chunk is complete
+2. If previous chunk is still `processing` or `pending`, returns error (triggers retry)
+3. If previous chunk is `complete`, loads its emitted context
+4. If previous chunk is `failed`, returns error (dependent failure)
+
+This ensures chunks are processed in dependency order even with concurrent execution.
 
 ### Alignment Module (HARDY Algorithm)
 
@@ -376,12 +501,14 @@ Cloud Function (transcribeAudio)
 ```
 
 **Key Components:**
+
 - `functions/src/alignment.ts` - HARDY algorithm implementation
 - Uses `fuzzball` for fuzzy string matching
 - Uses `replicate` SDK for WhisperX API calls
 - `REPLICATE_API_TOKEN` stored as Firebase secret
 
 **Fallback Behavior:**
+
 - If WhisperX times out or fails, the Cloud Function uses Gemini's original timestamps
 - The `alignmentError` field stores the reason for fallback
 - Client displays "Fallback Sync" badge with tooltip explaining the issue
@@ -440,12 +567,14 @@ Cloud Function (transcribeAudio)
 ```
 
 **Filter UI (responsive):**
+
 - **Desktop**: 300px sticky sidebar with collapsible sections
 - **Mobile**: Bottom sheet triggered by "Filters (N)" button
   - Drag-to-dismiss gesture (swipe down >80px to close)
   - Backdrop click or Apply button also dismiss
 
 **Key Points:**
+
 - Search runs entirely client-side (no additional Firestore queries)
 - Uses conversations already loaded via ConversationContext
 - URL syncs with query AND filters for shareable search links
@@ -488,6 +617,7 @@ Cloud Function (transcribeAudio)
 ```
 
 **Key Components:**
+
 - `functions/src/chat.ts` - Main Cloud Function
 - `functions/src/utils/promptBuilder.ts` - Context-rich prompt construction
 - `functions/src/utils/timestampValidation.ts` - Source validation and confidence scoring
@@ -495,12 +625,14 @@ Cloud Function (transcribeAudio)
 - `functions/src/utils/chatMetrics.ts` - Chat-specific metrics recording
 
 **Rate Limiting:**
+
 - 20 queries per conversation per day per user
 - Stored in `_chat_rate_limits/{conversationId}_{userId}_{YYYY-MM-DD}`
 - Resets daily at midnight UTC
 - Uses Firestore transactions for atomic increment
 
 **Unanswerable Questions:**
+
 - LLM instructed to explicitly state when information not in transcript
 - `isUnanswerable` flag set based on response patterns
 - Empty or low-confidence sources returned for unanswerable questions
@@ -527,6 +659,7 @@ The chat interface is integrated into the Viewer sidebar as a third tab alongsid
 ```
 
 **Component Hierarchy:**
+
 ```
 Viewer.tsx
 ├── useChat({ conversationId })
@@ -556,6 +689,7 @@ Viewer.tsx
 ```
 
 **State Management:**
+
 1. **useChatHistory Hook** (`hooks/useChatHistory.ts`):
    - Real-time Firestore listener for message synchronization
    - Loads most recent 10 messages initially
@@ -584,6 +718,7 @@ Viewer.tsx
    - Error transformation from Firebase error codes
 
 **User Flow:**
+
 ```
 1. User clicks Chat tab in Sidebar
         ↓
@@ -619,12 +754,14 @@ Viewer.tsx
 ```
 
 **Timestamp Citations:**
+
 - Format: `[▶ 12:34 - Speaker Name]`
 - Clicking navigates to segment and seeks audio
 - Uses existing `handleNavigateToSegment()` + `seek()` from Viewer
 - Blue pill styling matching design system
 
 **Empty State:**
+
 - Shows when `messages.length === 0`
 - Provides 4 example questions:
   - "What are the main topics discussed?"
@@ -633,11 +770,13 @@ Viewer.tsx
   - "Can you summarize the conversation?"
 
 **Error Handling:**
+
 - Rate limit exceeded → dismissible error banner
 - Network errors → dismissible error banner
 - Failed messages do not persist to Firestore
 
 **Chat History Persistence:**
+
 - Messages stored in Firestore `conversations/{id}/chatHistory` subcollection
 - Real-time synchronization across tabs and devices
 - Survives page reloads and browser restarts
@@ -645,12 +784,14 @@ Viewer.tsx
 - Draft input persists when switching tabs (in-memory only)
 
 **Message Limits:**
+
 - 50 message limit per conversation (user + assistant combined)
 - Warning indicator at 45 messages (yellow badge)
 - Blocking indicator at 50 messages (red badge + disabled input)
 - Clear history resets count to 0
 
 **Chat History Controls:**
+
 - **Export**: Downloads all messages as JSON with metadata
 - **Clear**: Batch deletes all messages (with confirmation modal)
 - **Load Older**: Pagination for loading previous messages (10 at a time)
@@ -683,10 +824,7 @@ Sidebar → Transcript:
 All Firestore queries include `userId` filter:
 
 ```typescript
-query(
-  collection(db, 'conversations'),
-  where('userId', '==', user.uid)
-)
+query(collection(db, 'conversations'), where('userId', '==', user.uid));
 ```
 
 ### Security Rules
@@ -774,14 +912,14 @@ The observability system provides comprehensive metrics, cost tracking, and usag
 
 ### Firestore Collections
 
-| Collection | Purpose | Writers | Readers |
-|------------|---------|---------|---------|
-| `_metrics` | Per-job processing details + LLM usage | Cloud Functions | Admin |
-| `_user_events` | Activity audit trail | Cloud Functions | Admin |
-| `_user_stats` | Pre-computed user aggregates | Cloud Functions | Owner, Admin |
-| `_global_stats` | System-wide aggregates | Cloud Functions | Admin |
-| `_daily_stats` | Time-series for charts | Cloud Functions | Admin |
-| `_pricing` | LLM pricing configuration | Admin | All authenticated |
+| Collection      | Purpose                                | Writers         | Readers           |
+| --------------- | -------------------------------------- | --------------- | ----------------- |
+| `_metrics`      | Per-job processing details + LLM usage | Cloud Functions | Admin             |
+| `_user_events`  | Activity audit trail                   | Cloud Functions | Admin             |
+| `_user_stats`   | Pre-computed user aggregates           | Cloud Functions | Owner, Admin      |
+| `_global_stats` | System-wide aggregates                 | Cloud Functions | Admin             |
+| `_daily_stats`  | Time-series for charts                 | Cloud Functions | Admin             |
+| `_pricing`      | LLM pricing configuration              | Admin           | All authenticated |
 
 See [Data Model](data-model.md) for detailed schemas.
 
@@ -819,6 +957,7 @@ llmUsage: {
 The cost tracking system supports billing reconciliation through several mechanisms:
 
 **Pricing Snapshots**: Each `_metrics` document includes a `pricingSnapshot` capturing:
+
 - The exact rates used for cost calculation
 - The `_pricing` document IDs (or null when falling back to defaults)
 - The timestamp when pricing was looked up
@@ -826,11 +965,13 @@ The cost tracking system supports billing reconciliation through several mechani
 This enables historical cost recalculation even after prices change.
 
 **Replicate Prediction IDs**: WhisperX metrics include the actual `predictionId` from Replicate, enabling:
+
 - Direct correlation with Replicate billing data
 - Verification of compute time estimates
 - Traceability for cost audits
 
 **Vertex AI Request Labels**: All Gemini API calls include billing attribution labels (`functions/src/utils/llmMetadata.ts`):
+
 - `conversation_id`: Correlates costs with specific conversations
 - `user_id`: Enables per-user cost tracking
 - `call_type`: Distinguishes between different Gemini operations (pre_analysis, analysis, chat, etc.)
@@ -844,11 +985,12 @@ Costs are calculated using database-driven pricing configuration:
 
 ```typescript
 // Gemini (token-based)
-geminiCost = (inputTokens * inputPricePerMillion / 1_000_000)
-           + (outputTokens * outputPricePerMillion / 1_000_000)
+geminiCost =
+  (inputTokens * inputPricePerMillion) / 1_000_000 +
+  (outputTokens * outputPricePerMillion) / 1_000_000;
 
 // Replicate (time-based)
-replicateCost = computeTimeSeconds * pricePerSecond
+replicateCost = computeTimeSeconds * pricePerSecond;
 ```
 
 Pricing is looked up by model and timestamp, supporting historical accuracy as prices change.
@@ -873,6 +1015,7 @@ recordUserEvent('processing_completed', { durationMs, estimatedCostUsd })
 ### Rolling Window Stats
 
 User stats maintain three time windows:
+
 - **Lifetime**: All-time totals
 - **Last 7 Days**: Rolling week
 - **Last 30 Days**: Rolling month
@@ -894,19 +1037,23 @@ Five-tab interface for administrators:
 Accessed via `/admin/jobs/:metricId` when clicking a job row in the Jobs tab. Shows comprehensive job-level observability:
 
 **Timing Breakdown:**
+
 - Visual progress bars showing relative time spent in each phase
 - Detailed millisecond-level timing for: download, WhisperX, segment building, Gemini analysis, speaker correction, transform, and Firestore write operations
 
 **LLM Usage:**
+
 - Per-call token counts for Gemini Analysis and Speaker Correction
 - WhisperX compute time with direct links to Replicate predictions for billing verification
 - Diarization compute time (if applicable)
 
 **Pricing Snapshot:**
+
 - Captured rates used at job execution time
 - Enables historical cost verification even after pricing changes
 
 **Cost Verification:**
+
 - "Estimated vs Current" comparison using `CostVerificationBadge`
 - Visual indicators: ✓ (green) for variance <1%, ⚠️ (yellow) for 1-5%, ❌ (red) for >5%
 - Hover tooltip shows detailed variance breakdown
@@ -914,6 +1061,7 @@ Accessed via `/admin/jobs/:metricId` when clicking a job row in the Jobs tab. Sh
 ### Chat Metrics Tab
 
 Aggregates chat queries by conversation, showing:
+
 - Query count per conversation
 - Total tokens (input/output breakdown)
 - Average response time
@@ -921,6 +1069,7 @@ Aggregates chat queries by conversation, showing:
 - Last query timestamp
 
 **Pricing Migration Warning:**
+
 - Displayed when any chat metrics lack `pricingSnapshot` field
 - Indicates billing reconciliation is not yet available for those queries
 - Helps track rollout of pricing snapshot feature
@@ -930,6 +1079,7 @@ Aggregates chat queries by conversation, showing:
 Accessible at `/admin/reports/cost-reconciliation`. Provides billing verification workflow:
 
 **Period Summaries:**
+
 - Weekly or monthly aggregation toggle
 - Per-service breakdown (Gemini, WhisperX, Chat)
 - Estimated vs recalculated cost comparison
@@ -937,16 +1087,19 @@ Accessible at `/admin/reports/cost-reconciliation`. Provides billing verificatio
 - Status badges: ✓ Match, ⚠️ Minor, ❌ Significant
 
 **Pricing Change Log:**
+
 - All pricing configuration changes within the date range
 - Effective dates and rate details
 - Notes field for tracking why pricing changed
 
 **CSV Export:**
+
 - Finance-friendly export format
 - Columns: Period, Service, Jobs, Estimated Cost, Recalculated Cost, Variance, Variance %
 - Filename includes export date for tracking
 
 **Variance Thresholds:**
+
 - Match: <1% variance
 - Minor: 1-5% variance (yellow)
 - Significant: >5% variance (red)
@@ -954,10 +1107,12 @@ Accessible at `/admin/reports/cost-reconciliation`. Provides billing verificatio
 ### Cost Verification Badge
 
 Reusable component that appears in:
+
 - MetricsTable expanded rows
 - Job Detail page cost comparison section
 
 **Functionality:**
+
 - Calls `recalculateCostWithCurrentPricing()` to compare stored cost against current pricing
 - Memoized to avoid redundant computation
 - Hover tooltip shows detailed breakdown: original cost, recalculated cost, variance amount and percentage
@@ -965,6 +1120,7 @@ Reusable component that appears in:
 
 **Variance Calculation:**
 For processing metrics:
+
 ```typescript
 // Recalculate using current pricing
 geminiCost = lookup(model).inputPrice * tokens...
@@ -974,19 +1130,24 @@ variancePercent = (variance / originalCost) * 100
 ```
 
 For chat metrics:
+
 ```typescript
-chatCost = lookup(model).inputPrice * inputTokens + lookup(model).outputPrice * outputTokens
-variance = recalculatedCost - originalCost
+chatCost =
+  lookup(model).inputPrice * inputTokens +
+  lookup(model).outputPrice * outputTokens;
+variance = recalculatedCost - originalCost;
 ```
 
 ### User Stats Page
 
 Personal usage statistics for all users:
+
 - Lifetime totals (conversations, audio hours, estimated cost)
 - 7-day and 30-day rolling windows
 - Recent processing jobs table
 
 **Pricing Accuracy Indicator:**
+
 - Shows comparison of stored pricing snapshot vs current pricing configuration
 - Visual badge: ✓ Match (<1%), ⚠️ Minor (1-5%), ❌ Significant (>5%)
 - Displays timestamp when rates were captured
@@ -994,6 +1155,7 @@ Personal usage statistics for all users:
 - Admin users see link to detailed cost breakdown in admin dashboard
 
 **Cost Display Centralization:**
+
 - Inline cost indicators removed from upload/delete/abort modals
 - Cost details consolidated in My Stats page for accuracy
 - Prevents displaying ad-hoc cost guesses during active processing
@@ -1037,11 +1199,12 @@ Firebase provides automatic offline persistence:
 
 ```typescript
 const db = initializeFirestore(app, {
-  cacheSizeBytes: 100 * 1024 * 1024 // 100MB
+  cacheSizeBytes: 100 * 1024 * 1024, // 100MB
 });
 ```
 
 Behavior:
+
 - Reads from cache first (instant)
 - Writes queue locally, sync when online
 - Real-time listeners work offline with cached data
@@ -1057,12 +1220,12 @@ Behavior:
 
 ### Bundle Size
 
-| Module | Size (gzipped) |
-|--------|----------------|
-| React + ReactDOM | ~45KB |
-| Firebase SDK | ~35KB |
-| Application Code | ~25KB |
-| Tailwind CSS | ~10KB |
+| Module           | Size (gzipped) |
+| ---------------- | -------------- |
+| React + ReactDOM | ~45KB          |
+| Firebase SDK     | ~35KB          |
+| Application Code | ~25KB          |
+| Tailwind CSS     | ~10KB          |
 
 ## Deployment Architecture
 
@@ -1098,13 +1261,16 @@ Behavior:
 The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migrated from `@google/generative-ai` to enable billing labels). Cloud Functions authenticate automatically using the default service account.
 
 **Environment Variables:**
+
 - `GCLOUD_PROJECT` or `GCP_PROJECT`: Auto-detected by Cloud Functions
 - `VERTEX_AI_LOCATION`: Defaults to `us-central1` if not set
 
 **Required IAM Permission:**
+
 - The Cloud Functions service account (`PROJECT@appspot.gserviceaccount.com`) requires `roles/aiplatform.endpoints.predict` to call Vertex AI models.
 
 **WhisperX Prediction Tracking:**
+
 - `transcribeWithWhisperX()` and `transcribeWithWhisperXRobust()` both return `predictionId` from Replicate's predictions API
 - Stored in `_metrics` documents for correlation with Replicate billing data
 - Enables traceability and cost audit for WhisperX transcription jobs
@@ -1113,22 +1279,22 @@ The application uses the `@google-cloud/vertexai` SDK for Gemini API calls (migr
 
 The application requires the following Google Cloud APIs:
 
-| API | Service | Purpose |
-|-----|---------|---------|
-| `aiplatform.googleapis.com` | Vertex AI | Gemini API calls with billing labels |
-| `cloudfunctions.googleapis.com` | Cloud Functions | Serverless function execution |
-| `cloudscheduler.googleapis.com` | Cloud Scheduler | Scheduled functions (daily stats aggregation) |
-| `cloudbuild.googleapis.com` | Cloud Build | Build container images for functions |
-| `artifactregistry.googleapis.com` | Artifact Registry | Store container images |
-| `run.googleapis.com` | Cloud Run | Functions v2 runtime (functions run as containers) |
-| `eventarc.googleapis.com` | Eventarc | Route Storage events to Cloud Functions |
-| `pubsub.googleapis.com` | Pub/Sub | Event message delivery (used by Eventarc) |
-| `secretmanager.googleapis.com` | Secret Manager | Secure storage for REPLICATE_API_TOKEN and HUGGINGFACE_ACCESS_TOKEN |
-| `firestore.googleapis.com` | Firestore | NoSQL database |
-| `storage.googleapis.com` | Cloud Storage | Audio file storage |
-| `iamcredentials.googleapis.com` | IAM Credentials | Workload Identity for CI/CD |
-| `cloudbilling.googleapis.com` | Cloud Billing | Project billing verification |
-| `firebaseextensions.googleapis.com` | Firebase Extensions | Firebase deployment features |
+| API                                 | Service             | Purpose                                                             |
+| ----------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| `aiplatform.googleapis.com`         | Vertex AI           | Gemini API calls with billing labels                                |
+| `cloudfunctions.googleapis.com`     | Cloud Functions     | Serverless function execution                                       |
+| `cloudscheduler.googleapis.com`     | Cloud Scheduler     | Scheduled functions (daily stats aggregation)                       |
+| `cloudbuild.googleapis.com`         | Cloud Build         | Build container images for functions                                |
+| `artifactregistry.googleapis.com`   | Artifact Registry   | Store container images                                              |
+| `run.googleapis.com`                | Cloud Run           | Functions v2 runtime (functions run as containers)                  |
+| `eventarc.googleapis.com`           | Eventarc            | Route Storage events to Cloud Functions                             |
+| `pubsub.googleapis.com`             | Pub/Sub             | Event message delivery (used by Eventarc)                           |
+| `secretmanager.googleapis.com`      | Secret Manager      | Secure storage for REPLICATE_API_TOKEN and HUGGINGFACE_ACCESS_TOKEN |
+| `firestore.googleapis.com`          | Firestore           | NoSQL database                                                      |
+| `storage.googleapis.com`            | Cloud Storage       | Audio file storage                                                  |
+| `iamcredentials.googleapis.com`     | IAM Credentials     | Workload Identity for CI/CD                                         |
+| `cloudbilling.googleapis.com`       | Cloud Billing       | Project billing verification                                        |
+| `firebaseextensions.googleapis.com` | Firebase Extensions | Firebase deployment features                                        |
 
 ### Cloud Functions v2 Event Pipeline
 
@@ -1197,21 +1363,21 @@ When an audio file is uploaded to Storage, this event pipeline triggers transcri
 
 #### User-Managed Service Accounts
 
-| Service Account | Purpose | Key Roles |
-|-----------------|---------|-----------|
-| `firebase-adminsdk-*@PROJECT.iam.gserviceaccount.com` | CI/CD deployment | Cloud Functions Admin, Cloud Scheduler Admin, Secret Manager Admin, Firebase Admin |
-| `PROJECT@appspot.gserviceaccount.com` | Cloud Functions runtime | Secret Manager Secret Accessor (auto-granted) |
+| Service Account                                       | Purpose                 | Key Roles                                                                          |
+| ----------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------- |
+| `firebase-adminsdk-*@PROJECT.iam.gserviceaccount.com` | CI/CD deployment        | Cloud Functions Admin, Cloud Scheduler Admin, Secret Manager Admin, Firebase Admin |
+| `PROJECT@appspot.gserviceaccount.com`                 | Cloud Functions runtime | Secret Manager Secret Accessor (auto-granted)                                      |
 
 #### Google-Managed Service Agents
 
 These are automatically created and managed by Google Cloud:
 
-| Service Agent | Format | Purpose | Required Role |
-|---------------|--------|---------|---------------|
-| Storage | `service-PROJECT_NUM@gs-project-accounts.iam.gserviceaccount.com` | Publish storage events | `roles/pubsub.publisher` |
-| Pub/Sub | `service-PROJECT_NUM@gcp-sa-pubsub.iam.gserviceaccount.com` | Create auth tokens for event delivery | `roles/iam.serviceAccountTokenCreator` |
-| Eventarc | `service-PROJECT_NUM@gcp-sa-eventarc.iam.gserviceaccount.com` | Read storage bucket metadata | `objectViewer` on bucket |
-| Compute | `PROJECT_NUM-compute@developer.gserviceaccount.com` | Invoke Cloud Run, receive events | `roles/run.invoker`, `roles/eventarc.eventReceiver` |
+| Service Agent | Format                                                            | Purpose                               | Required Role                                       |
+| ------------- | ----------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------- |
+| Storage       | `service-PROJECT_NUM@gs-project-accounts.iam.gserviceaccount.com` | Publish storage events                | `roles/pubsub.publisher`                            |
+| Pub/Sub       | `service-PROJECT_NUM@gcp-sa-pubsub.iam.gserviceaccount.com`       | Create auth tokens for event delivery | `roles/iam.serviceAccountTokenCreator`              |
+| Eventarc      | `service-PROJECT_NUM@gcp-sa-eventarc.iam.gserviceaccount.com`     | Read storage bucket metadata          | `objectViewer` on bucket                            |
+| Compute       | `PROJECT_NUM-compute@developer.gserviceaccount.com`               | Invoke Cloud Run, receive events      | `roles/run.invoker`, `roles/eventarc.eventReceiver` |
 
 ### IAM Role Dependencies
 

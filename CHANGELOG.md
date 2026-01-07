@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each chunk processed as separate Cloud Task, staying within Cloud Function time limits
   - Chunk metadata stored in Firestore for downstream merge/deduplication (Scope 5c)
   - New `ProcessingStep.CHUNKING` shows chunking progress in UI
+- **Chunk Context Propagation** - Speaker identity and metadata maintained across chunk boundaries
+  - Each chunk emits a `ChunkContext` with speaker mappings, summary, and extracted IDs
+  - Next chunk loads previous context to maintain diarization continuity
+  - Firestore transactions ensure atomic status updates even with concurrent chunk tasks
+  - Resumable execution: failed/pending chunks can be retried with correct state bootstrap
 
 ### Changed
 - **Queue-Driven Transcription Architecture** - Large audio files (46MB+) now process reliably without timeouts

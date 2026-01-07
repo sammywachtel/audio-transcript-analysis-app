@@ -134,3 +134,117 @@ export interface ProcessingTimeline {
   completedAt?: string; // ISO timestamp
   durationMs?: number;
 }
+
+// =============================================================================
+// Chunked Processing Types
+// =============================================================================
+
+/**
+ * Status of individual chunk processing.
+ * Used to track progress and enable resumable execution.
+ */
+export type ChunkProcessingStatus = 'pending' | 'processing' | 'complete' | 'failed';
+
+/**
+ * Status entry for a single chunk in the processing pipeline.
+ * Tracks lifecycle timestamps and any errors for resume logic.
+ */
+export interface ChunkStatus {
+  /** Zero-indexed chunk number */
+  chunkIndex: number;
+  /** Current processing state */
+  status: ChunkProcessingStatus;
+  /** When processing started (ISO timestamp) */
+  startedAt?: string;
+  /** When processing completed (ISO timestamp) */
+  completedAt?: string;
+  /** Error message if status is 'failed' */
+  error?: string;
+  /** Number of retry attempts for this chunk */
+  retryCount?: number;
+}
+
+/**
+ * Speaker identity mapping preserved across chunk boundaries.
+ * Maps pyannote speaker IDs to consistent identities.
+ */
+export interface SpeakerMapping {
+  /** Original speaker ID from current chunk (e.g., "SPEAKER_00") */
+  originalId: string;
+  /** Canonical speaker ID used across all chunks */
+  canonicalId: string;
+  /** Inferred display name if known */
+  displayName?: string;
+  /** Voice signature hint for matching (future use) */
+  voiceSignature?: string;
+}
+
+/**
+ * Context passed between chunk processing tasks.
+ * Enables diarization continuity and resumable execution.
+ *
+ * This is the state machine's "carry forward" data - each chunk
+ * reads the previous context and emits a new one for the next chunk.
+ */
+export interface ChunkContext {
+  /** Which chunk this context was emitted by (for validation) */
+  emittedByChunkIndex: number;
+  /** Speaker mappings discovered so far */
+  speakerMap: SpeakerMapping[];
+  /** Short summary of content processed so far (max ~512 chars, sanitized) */
+  previousSummary: string;
+  /** Terms extracted from previous chunks (for deduplication) */
+  knownTermIds: string[];
+  /** Topic IDs from previous chunks */
+  knownTopicIds: string[];
+  /** Person IDs from previous chunks */
+  knownPersonIds: string[];
+  /** Total segments processed so far (for index continuity) */
+  cumulativeSegmentCount: number;
+  /** Timestamp of last processed audio (ms in original) for continuity */
+  lastProcessedMs: number;
+}
+
+/**
+ * Firestore-stored chunking metadata with status tracking.
+ * Extended from the original chunkMetadata to include context propagation.
+ */
+export interface ChunkingMetadata {
+  /** Whether chunking was applied */
+  chunkingEnabled: boolean;
+  /** Total number of chunks */
+  totalChunks: number;
+  /** Number of chunks that completed successfully */
+  completedChunks: number;
+  /** Per-chunk status array */
+  chunkStatuses: ChunkStatus[];
+  /** Per-chunk context sequence (chunkContexts[i] = context emitted by chunk i) */
+  chunkContexts: ChunkContext[];
+  /** When chunking was initiated (ISO timestamp) */
+  chunkedAt: string;
+  /** Original audio duration (ms) */
+  originalDurationMs: number;
+  /** Original audio storage path */
+  originalStoragePath: string;
+}
+
+/**
+ * Result returned by the transcription pipeline for chunk context propagation.
+ * Contains the data needed to build the next chunk's context.
+ */
+export interface ChunkPipelineResult {
+  /** Speaker mappings discovered in this chunk (originalId → canonicalId) */
+  speakerMappings: SpeakerMapping[];
+  /** Short summary of content processed (will be sanitized/truncated) */
+  summary: string;
+  /** Term IDs extracted in this chunk */
+  termIds: string[];
+  /** Topic IDs extracted in this chunk */
+  topicIds: string[];
+  /** Person IDs extracted in this chunk */
+  personIds: string[];
+  /** Number of segments processed in this chunk */
+  segmentCount: number;
+  /** Last timestamp processed in this chunk (ms) */
+  lastTimestampMs: number;
+}
