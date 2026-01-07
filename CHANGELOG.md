@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Audio Chunking for Large Files** - Files over 30 minutes are now automatically split into 10-15 minute chunks
+  - FFmpeg-based silence detection finds natural break points (using `-af silencedetect=n=-30dB:d=0.5`)
+  - Chunks include 5-10 second overlap to prevent word truncation at boundaries
+  - Each chunk processed as separate Cloud Task, staying within Cloud Function time limits
+  - Chunk metadata stored in Firestore for downstream merge/deduplication (Scope 5c)
+  - New `ProcessingStep.CHUNKING` shows chunking progress in UI
+
 ### Changed
 - **Queue-Driven Transcription Architecture** - Large audio files (46MB+) now process reliably without timeouts
   - Storage trigger (`transcribeAudio`) now acts as lightweight enqueuer (< 5 seconds), setting status to `queued`

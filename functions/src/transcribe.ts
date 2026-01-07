@@ -14,6 +14,9 @@ import { onObjectFinalized } from 'firebase-functions/v2/storage';
 import { defineSecret } from 'firebase-functions/params';
 import { VertexAI, SchemaType } from '@google-cloud/vertexai';
 import { FieldValue } from 'firebase-admin/firestore';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { db, bucket } from './index';
 import { ProgressManager, ProcessingStep } from './progressManager';
 import { transcribeWithWhisperX, transcribeWithWhisperXRobust, WhisperXSegment, WhisperXDiarizationHints } from './alignment';
@@ -26,6 +29,12 @@ import {
 import { recordUserEvent } from './userEvents';
 import { jsonrepair } from 'jsonrepair';
 import { buildGeminiLabels } from './utils/llmMetadata';
+import {
+  chunkAudioFile,
+  cleanupChunks,
+  ChunkMetadata
+} from './chunking';
+import { validateChunkSequence } from './chunkBounds';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
@@ -82,7 +91,7 @@ async function checkAbort(conversationId: string): Promise<void> {
 
 /**
  * Retry an operation with exponential backoff.
- * Useful for transient Firestore timeouts (DEADLINE_EXCEEDED).
+ * Handles transient errors: Firestore timeouts, Vertex AI cancellations, etc.
  */
 async function retryWithBackoff<T>(
   operation: () => Promise<T>,
@@ -95,9 +104,20 @@ async function retryWithBackoff<T>(
       return await operation();
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check for retryable errors:
+      // - Firestore: DEADLINE_EXCEEDED, UNAVAILABLE, RESOURCE_EXHAUSTED
+      // - Vertex AI: 499 (Client Closed Request), CANCELLED
+      // - General: 502, 503, 504 gateway errors
       const isRetryable = errorMessage.includes('DEADLINE_EXCEEDED') ||
                           errorMessage.includes('UNAVAILABLE') ||
-                          errorMessage.includes('RESOURCE_EXHAUSTED');
+                          errorMessage.includes('RESOURCE_EXHAUSTED') ||
+                          errorMessage.includes('499') ||
+                          errorMessage.includes('CANCELLED') ||
+                          errorMessage.includes('Client Closed Request') ||
+                          errorMessage.includes('502') ||
+                          errorMessage.includes('503') ||
+                          errorMessage.includes('504');
 
       if (!isRetryable || attempt === maxRetries) {
         console.error(`[Retry] ${operationName} failed after ${attempt} attempts:`, errorMessage);
@@ -619,21 +639,27 @@ Return as JSON with a "segments" array.
     // Build labels for billing attribution
     const labels = buildGeminiLabels(conversationId, userId, 'fallback_transcription');
 
-    const result = await model.generateContent({
-      contents: [
-        { role: 'user', parts: [{ text: prompt }] },
-        {
-          role: 'user',
-          parts: [{
-            inlineData: {
-              mimeType,
-              data: audioBase64
-            }
-          }]
-        }
-      ],
-      labels
-    });
+    // Wrap in retry logic - Vertex AI can return 499 (Client Closed Request) on large files
+    const result = await retryWithBackoff(
+      () => model.generateContent({
+        contents: [
+          { role: 'user', parts: [{ text: prompt }] },
+          {
+            role: 'user',
+            parts: [{
+              inlineData: {
+                mimeType,
+                data: audioBase64
+              }
+            }]
+          }
+        ],
+        labels
+      }),
+      'Gemini Fallback transcription',
+      3,      // maxRetries
+      10000   // 10 second base delay (longer for large file processing)
+    );
 
     const durationMs = Date.now() - startTime;
     // Vertex AI SDK response structure
@@ -1352,6 +1378,11 @@ export const transcribeAudio = onObjectFinalized(
       sizeMB: (event.data.size / (1024 * 1024)).toFixed(2)
     });
 
+    // Initialize progress manager for UI feedback
+    const progressManager = new ProgressManager(conversationId);
+    let tempAudioPath: string | null = null;
+    let localChunkPaths: string[] = [];
+
     try {
       // Update status to queued (processing will start when Cloud Tasks picks it up)
       // Using set() with merge to handle race condition where storage trigger fires
@@ -1391,67 +1422,224 @@ export const transcribeAudio = onObjectFinalized(
 
         console.log('[Transcribe] ✅ Direct processing complete:', { conversationId });
       } else {
-        // Production: Enqueue Cloud Task for heavy processing
-        // This allows the storage trigger to complete quickly (within 540s limit)
-        // while the actual processing runs in an HTTP function with 60-minute timeout
+        // Production: Download audio to check if chunking is needed
+        // For long files, we split into chunks before enqueuing Cloud Tasks
+
+        // Update status to show chunking step
+        await progressManager.setStep(ProcessingStep.CHUNKING);
+
+        // Download audio to temp file for duration check and potential chunking
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audio-upload-'));
+        const sourceExt = path.extname(filePath) || '.mp3';
+        tempAudioPath = path.join(tempDir, `original${sourceExt}`);
+
+        console.log('[Transcribe] Downloading audio for chunking analysis:', {
+          conversationId,
+          filePath,
+          tempAudioPath
+        });
+
+        const file = bucket.file(filePath);
+        await file.download({ destination: tempAudioPath });
+
+        console.log('[Transcribe] Audio downloaded to temp file:', {
+          conversationId,
+          tempAudioPath,
+          sizeBytes: fs.statSync(tempAudioPath).size
+        });
+
+        // Attempt chunking (will return quickly if file is short enough)
+        const { result: chunkingResult, localChunkPaths: chunkPaths } = await chunkAudioFile(
+          tempAudioPath,
+          filePath
+        );
+        localChunkPaths = chunkPaths;
+
+        // Set up Cloud Tasks client
         const { CloudTasksClient } = await import('@google-cloud/tasks');
         const tasksClient = new CloudTasksClient();
 
-        // Get project ID from environment
         const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
         if (!project) {
           throw new Error('GCP project ID not found in environment');
         }
 
-        // Build queue path
         const location = 'us-central1';
         const queue = 'transcription-queue';
         const parent = tasksClient.queuePath(project, location, queue);
 
-        // Build HTTP request URL for processTranscription function
-        // Format: https://{location}-{project}.cloudfunctions.net/{functionName}
         const functionName = 'processTranscription';
         const processTranscriptionUrl = `https://${location}-${project}.cloudfunctions.net/${functionName}`;
 
-        // Build task payload
-        const payload = {
-          conversationId,
-          userId,
-          filePath
-        };
+        const DISPATCH_DEADLINE_SECONDS = 1800; // 30 minutes (max for HTTP targets)
 
-        // Create Cloud Task
-        const task = {
-          httpRequest: {
-            httpMethod: 'POST' as const,
-            url: processTranscriptionUrl,
-            headers: {
-              'Content-Type': 'application/json'
+        if (!chunkingResult.chunked) {
+          // Short file - no chunking needed, process as single file
+          console.log('[Transcribe] File is short enough - no chunking needed:', {
+            conversationId,
+            durationMs: chunkingResult.originalDurationMs
+          });
+
+          // Build task payload (original behavior)
+          const payload = {
+            conversationId,
+            userId,
+            filePath
+          };
+
+          const task = {
+            httpRequest: {
+              httpMethod: 'POST' as const,
+              url: processTranscriptionUrl,
+              headers: { 'Content-Type': 'application/json' },
+              body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+              oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
             },
-            body: Buffer.from(JSON.stringify(payload)).toString('base64'),
-            oidcToken: {
-              serviceAccountEmail: `${project}@appspot.gserviceaccount.com`
-            }
-          },
-          scheduleTime: {
-            seconds: Math.floor(Date.now() / 1000) + 5  // Schedule 5 seconds from now (avoid race conditions)
+            scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 },
+            dispatchDeadline: { seconds: DISPATCH_DEADLINE_SECONDS }
+          };
+
+          console.log('[Transcribe] Creating Cloud Task:', {
+            conversationId,
+            queue: `${location}/${queue}`,
+            targetUrl: processTranscriptionUrl,
+            scheduleDelaySeconds: 5
+          });
+
+          const [createdTask] = await tasksClient.createTask({ parent, task });
+
+          console.log('[Transcribe] ✅ Task enqueued successfully:', {
+            conversationId,
+            taskName: createdTask.name,
+            scheduleTime: createdTask.scheduleTime
+          });
+
+        } else {
+          // Long file - upload chunks and create one task per chunk
+          console.log('[Transcribe] File requires chunking:', {
+            conversationId,
+            originalDurationMs: chunkingResult.originalDurationMs,
+            chunkCount: chunkingResult.chunks.length
+          });
+
+          // Validate chunk sequence before proceeding
+          const validation = validateChunkSequence(chunkingResult.chunks);
+          if (!validation.valid) {
+            console.error('[Transcribe] Chunk validation failed:', validation.errors);
+            throw new Error(`Chunk validation failed: ${validation.errors.join(', ')}`);
           }
-        };
+          if (validation.warnings.length > 0) {
+            console.warn('[Transcribe] Chunk validation warnings:', validation.warnings);
+          }
 
-        console.log('[Transcribe] Creating Cloud Task:', {
-          conversationId,
-          queue: `${location}/${queue}`,
-          targetUrl: processTranscriptionUrl,
-          scheduleDelaySeconds: 5
-        });
+          // Upload each chunk to Storage
+          const chunksStoragePrefix = `chunks/${conversationId}`;
+          const uploadedChunks: ChunkMetadata[] = [];
 
-        const [createdTask] = await tasksClient.createTask({ parent, task });
+          for (let i = 0; i < chunkingResult.chunks.length; i++) {
+            const chunk = chunkingResult.chunks[i];
+            const localPath = localChunkPaths[i];
+            const chunkFileName = `chunk-${chunk.chunkIndex.toString().padStart(3, '0')}${sourceExt}`;
+            const chunkStoragePath = `${chunksStoragePrefix}/${chunkFileName}`;
 
-        console.log('[Transcribe] ✅ Task enqueued successfully:', {
-          conversationId,
-          taskName: createdTask.name,
-          scheduleTime: createdTask.scheduleTime
-        });
+            console.log('[Transcribe] Uploading chunk:', {
+              conversationId,
+              chunkIndex: chunk.chunkIndex,
+              localPath,
+              chunkStoragePath
+            });
+
+            await bucket.upload(localPath, {
+              destination: chunkStoragePath,
+              metadata: {
+                contentType: contentType || 'audio/mpeg',
+                metadata: {
+                  conversationId,
+                  chunkIndex: chunk.chunkIndex.toString(),
+                  totalChunks: chunk.totalChunks.toString(),
+                  startMs: chunk.startMs.toString(),
+                  endMs: chunk.endMs.toString()
+                }
+              }
+            });
+
+            // Update chunk with storage path
+            const uploadedChunk: ChunkMetadata = {
+              ...chunk,
+              chunkStoragePath
+            };
+            uploadedChunks.push(uploadedChunk);
+
+            console.log('[Transcribe] Chunk uploaded:', {
+              conversationId,
+              chunkIndex: chunk.chunkIndex,
+              chunkStoragePath
+            });
+          }
+
+          // Store chunk metadata in Firestore for downstream processing
+          await db.collection('conversations').doc(conversationId).update({
+            chunkMetadata: {
+              chunked: true,
+              chunks: uploadedChunks,
+              originalDurationMs: chunkingResult.originalDurationMs,
+              originalStoragePath: filePath,
+              totalChunks: uploadedChunks.length,
+              chunkedAt: FieldValue.serverTimestamp()
+            },
+            updatedAt: FieldValue.serverTimestamp()
+          });
+
+          console.log('[Transcribe] Chunk metadata saved to Firestore:', {
+            conversationId,
+            chunkCount: uploadedChunks.length
+          });
+
+          // Create one Cloud Task per chunk
+          // Stagger scheduling to avoid thundering herd
+          const taskPromises = uploadedChunks.map(async (chunk, index) => {
+            const payload = {
+              conversationId,
+              userId,
+              filePath: chunk.chunkStoragePath,
+              chunkIndex: chunk.chunkIndex,
+              totalChunks: chunk.totalChunks,
+              chunkMetadata: chunk
+            };
+
+            const task = {
+              httpRequest: {
+                httpMethod: 'POST' as const,
+                url: processTranscriptionUrl,
+                headers: { 'Content-Type': 'application/json' },
+                body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+                oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+              },
+              // Stagger tasks: 5s base + 2s per chunk to avoid overload
+              scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 + (index * 2) },
+              dispatchDeadline: { seconds: DISPATCH_DEADLINE_SECONDS }
+            };
+
+            const [createdTask] = await tasksClient.createTask({ parent, task });
+
+            console.log('[Transcribe] Chunk task enqueued:', {
+              conversationId,
+              chunkIndex: chunk.chunkIndex,
+              taskName: createdTask.name,
+              scheduleTime: createdTask.scheduleTime
+            });
+
+            return createdTask;
+          });
+
+          const createdTasks = await Promise.all(taskPromises);
+
+          console.log('[Transcribe] ✅ All chunk tasks enqueued:', {
+            conversationId,
+            taskCount: createdTasks.length,
+            chunkIndices: uploadedChunks.map(c => c.chunkIndex)
+          });
+        }
       }
 
     } catch (error) {
@@ -1480,6 +1668,21 @@ export const transcribeAudio = onObjectFinalized(
           errorMessage: `Enqueue failed: ${errorMessage}`
         }
       });
+    } finally {
+      // Always clean up temp files
+      if (localChunkPaths.length > 0) {
+        console.log('[Transcribe] Cleaning up temp chunk files:', { count: localChunkPaths.length });
+        cleanupChunks(localChunkPaths);
+      }
+      if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+        try {
+          fs.unlinkSync(tempAudioPath);
+          const tempDir = path.dirname(tempAudioPath);
+          fs.rmdirSync(tempDir);
+        } catch (cleanupError) {
+          console.warn('[Transcribe] Failed to clean up temp audio file:', cleanupError);
+        }
+      }
     }
   }
 );
