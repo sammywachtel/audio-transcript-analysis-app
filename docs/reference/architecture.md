@@ -191,7 +191,7 @@ audio-transcript-analysis-app/
 
 ## Data Flow
 
-### Upload Flow (Queue-Driven Architecture)
+### Upload Flow (Queue-Driven Architecture with Chunking)
 
 ```
 1. User selects audio file
@@ -202,28 +202,43 @@ audio-transcript-analysis-app/
 3. Frontend creates Firestore doc (status: 'processing', alignmentStatus: 'pending')
    firestoreService.save(conversation)
         ↓
-4. Storage trigger fires transcribeAudio (lightweight)
+4. Storage trigger fires transcribeAudio
    onObjectFinalized → transcribeAudio()
         ↓
-5. transcribeAudio validates upload and enqueues Cloud Task
-   ├── Updates Firestore: status='queued', queuedAt=timestamp
-   └── Creates task in 'transcription-queue'
+5. transcribeAudio downloads audio for duration check
+   ├── Updates Firestore: status='queued'
+   └── Downloads to /tmp for analysis
         ↓
-6. Cloud Tasks invokes processTranscription (HTTP function, 60-min timeout)
-   ├── Updates Firestore: status='processing', processingStartedAt=timestamp
-   └── Downloads audio from Storage
+6. Chunking decision based on duration
+   ├── Short file (≤30 min) → Single Cloud Task (step 7a)
+   └── Long file (>30 min) → Chunking workflow (step 7b)
+
+7a. Short file: Enqueue single task
+    └── Creates task in 'transcription-queue'
+         ↓
+7b. Long file: Chunk and enqueue multiple tasks
+    ├── Detect silence gaps via ffmpeg
+    ├── Split at natural break points (10-15 min chunks)
+    ├── Add 5-10s overlap between chunks
+    ├── Upload chunks to Storage (chunks/{conversationId}/)
+    ├── Save chunk metadata to Firestore
+    └── Enqueue one Cloud Task per chunk
+         ↓
+8. Cloud Tasks invokes processTranscription (HTTP function, 30-min timeout per chunk)
+   ├── Updates Firestore: status='processing'
+   └── Downloads audio (chunk or full file) from Storage
         ↓
-7. processTranscription calls Gemini API for pre-analysis and content extraction
+9. processTranscription calls Gemini API for pre-analysis and content extraction
         ↓
-8. processTranscription calls WhisperX for transcription + alignment
-   ├── Success → alignmentStatus: 'aligned'
-   └── Failure → alignmentStatus: 'fallback' (uses Gemini transcription)
+10. processTranscription calls WhisperX for transcription + alignment
+    ├── Success → alignmentStatus: 'aligned'
+    └── Failure → alignmentStatus: 'fallback' (uses Gemini transcription)
         ↓
-9. processTranscription writes results to Firestore (status: 'complete')
-   ├── Success → Returns 200 (no Cloud Tasks retry)
-   └── Failure → Returns 500 (Cloud Tasks retries with backoff)
+11. processTranscription writes results to Firestore (status: 'complete')
+    ├── Success → Returns 200 (no Cloud Tasks retry)
+    └── Failure → Returns 500 (Cloud Tasks retries with backoff)
         ↓
-10. Real-time listener updates UI
+12. Real-time listener updates UI
     onSnapshot → setConversations()
 ```
 
@@ -232,6 +247,92 @@ audio-transcript-analysis-app/
 - Large audio files (46MB+) need 10-15+ minutes for Gemini + WhisperX processing
 - HTTP functions can have up to 3600s (60-minute) timeout
 - Cloud Tasks handles retries automatically with exponential backoff
+
+### Audio Chunking Module
+
+For audio files longer than 30 minutes, the system splits the file into smaller chunks to stay within Cloud Function timeout limits. Each chunk is processed independently, then merged downstream.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    Audio Chunking Pipeline                            │
+│                                                                       │
+│  ┌─────────────────┐                                                  │
+│  │  Original Audio │                                                  │
+│  │  (>30 minutes)  │                                                  │
+│  └────────┬────────┘                                                  │
+│           │                                                           │
+│           ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Silence Detection (ffmpeg -af silencedetect=n=-30dB:d=0.5)     │ │
+│  │  ├── Scans for pauses in speech                                 │ │
+│  │  └── Returns list of silence gaps (start, end, duration)        │ │
+│  └────────┬────────────────────────────────────────────────────────┘ │
+│           │                                                           │
+│           ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Chunk Boundary Calculation                                      │ │
+│  │  ├── Target: 10-15 minute chunks                                 │ │
+│  │  ├── Minimum: 2 minutes (prevents tiny chunks)                   │ │
+│  │  └── Snaps to silence gaps for clean cuts                        │ │
+│  └────────┬────────────────────────────────────────────────────────┘ │
+│           │                                                           │
+│           ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Chunk Extraction with Overlap                                   │ │
+│  │  ├── Extract each chunk via ffmpeg (-ss/-to/-c copy)            │ │
+│  │  ├── 5-10s overlap at boundaries                                 │ │
+│  │  └── Overlap ensures no words truncated                          │ │
+│  └────────┬────────────────────────────────────────────────────────┘ │
+│           │                                                           │
+│           ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Chunk Upload & Task Creation                                    │ │
+│  │  ├── Upload to Storage: chunks/{conversationId}/chunk-NNN.ext   │ │
+│  │  ├── Save metadata to Firestore (chunkMetadata field)           │ │
+│  │  └── Create Cloud Task per chunk (staggered scheduling)         │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Chunk Metadata Structure:**
+
+Each chunk stores metadata for downstream deduplication and merging:
+
+```typescript
+interface ChunkMetadata {
+  chunkIndex: number;        // Zero-indexed chunk number
+  totalChunks: number;       // Total chunks for this file
+  startMs: number;           // Start time in original audio
+  endMs: number;             // End time in original audio
+  overlapBeforeMs: number;   // Overlap with previous chunk (0 for first)
+  overlapAfterMs: number;    // Overlap with next chunk (0 for last)
+  chunkStoragePath: string;  // Storage path: chunks/{id}/chunk-NNN.ext
+  originalStoragePath: string; // Original file path
+  durationMs: number;        // Chunk duration (including overlaps)
+}
+```
+
+**Key Files:**
+- `functions/src/chunking.ts` - Silence detection, chunk boundary calculation, extraction
+- `functions/src/chunkBounds.ts` - Validation helpers, overlap region utilities
+- `@ffmpeg-installer/ffmpeg` - Provides ffmpeg binary for Cloud Functions
+
+**Configuration (CHUNK_CONFIG):**
+- `TARGET_DURATION_SECONDS`: 600 (10 min target)
+- `MAX_DURATION_SECONDS`: 900 (15 min max)
+- `MIN_DURATION_SECONDS`: 120 (2 min floor)
+- `OVERLAP_SECONDS`: 7 (5-10s overlap window)
+- `CHUNKING_THRESHOLD_SECONDS`: 1800 (30 min threshold)
+- `SILENCE_THRESHOLD_DB`: -30dB
+- `SILENCE_MIN_DURATION`: 0.5s
+
+**Benefits:**
+- Files of any length can be processed (no timeout issues)
+- Each chunk fits comfortably in 30-minute Cloud Task timeout
+- Silence-based splits prevent mid-word truncation
+- Overlap ensures transcript continuity at boundaries
+- Parallel processing possible with staggered task scheduling
 
 ### Alignment Module (HARDY Algorithm)
 
