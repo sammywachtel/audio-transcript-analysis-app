@@ -9,6 +9,13 @@
  * 4. Calls Gemini for content analysis (topics, terms, people)
  * 5. Saves results to Firestore
  *
+ * For chunked audio files (>30 min), this function:
+ * 1. Loads the ChunkContext from the previous chunk (or initial for chunk 0)
+ * 2. Marks the chunk as "processing" in chunkStatuses
+ * 3. Processes the chunk with context-aware diarization
+ * 4. Emits a new ChunkContext for the next chunk
+ * 5. Marks the chunk as "complete" or "failed" for resume logic
+ *
  * This function has a 60-minute timeout (vs 9-minute limit for storage triggers)
  * to handle large audio files (46MB+) that can take 10-15+ minutes to process.
  *
@@ -20,18 +27,43 @@ import { defineSecret } from 'firebase-functions/params';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db } from './index';
 import { executeTranscriptionPipeline } from './transcribe';
+import {
+  loadChunkContext,
+  markChunkProcessing,
+  markChunkComplete,
+  markChunkFailed,
+  buildNextContext
+} from './chunkContext';
+import { ChunkContext } from './types';
+import { ChunkMetadata } from './chunking';
 
 // Define secrets (same as transcribeAudio - needed for heavy processing)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');
 
 /**
- * Cloud Tasks payload for transcription job
+ * Cloud Tasks payload for transcription job.
+ * Extended for chunk tasks to include chunk-specific metadata.
  */
 interface TranscriptionTaskPayload {
   conversationId: string;
   userId: string;
   filePath: string;
+  // Chunk-specific fields (present for chunked audio processing)
+  chunkIndex?: number;
+  totalChunks?: number;
+  chunkMetadata?: ChunkMetadata;
+  chunkStartMs?: number;
+  chunkEndMs?: number;
+  overlapBeforeMs?: number;
+  overlapAfterMs?: number;
+}
+
+/**
+ * Check if this is a chunk task (vs a whole-file task).
+ */
+function isChunkTask(payload: TranscriptionTaskPayload): boolean {
+  return payload.chunkIndex !== undefined && payload.totalChunks !== undefined;
 }
 
 /**
@@ -85,28 +117,111 @@ export const processTranscription = onRequest(
     }
 
     const { conversationId, userId, filePath } = payload;
+    const isChunk = isChunkTask(payload);
+    const chunkIndex = payload.chunkIndex ?? -1;
+
+    // Chunk context for propagation (only used for chunk tasks)
+    let chunkContext: ChunkContext | null = null;
 
     try {
-      // Update Firestore to mark processing started
-      await db.collection('conversations').doc(conversationId).update({
-        status: 'processing',
-        processingStartedAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp()
-      });
+      // For chunk tasks, load context and mark as processing
+      if (isChunk) {
+        console.log('[ProcessTranscription] Chunk task detected:', {
+          conversationId,
+          chunkIndex,
+          totalChunks: payload.totalChunks,
+          chunkStartMs: payload.chunkStartMs,
+          chunkEndMs: payload.chunkEndMs
+        });
+
+        // Load context from previous chunk (or initial context for chunk 0)
+        try {
+          chunkContext = await loadChunkContext(conversationId, chunkIndex);
+          console.log('[ProcessTranscription] Loaded chunk context:', {
+            conversationId,
+            chunkIndex,
+            previousChunk: chunkContext.emittedByChunkIndex,
+            speakerCount: chunkContext.speakerMap.length,
+            cumulativeSegments: chunkContext.cumulativeSegmentCount
+          });
+        } catch (contextError) {
+          // If we can't load context, this chunk can't proceed
+          const errorMsg = contextError instanceof Error ? contextError.message : String(contextError);
+          console.error('[ProcessTranscription] Failed to load chunk context:', errorMsg);
+
+          // Mark chunk as failed (so resume logic knows it needs re-processing)
+          await markChunkFailed(conversationId, chunkIndex, `Context load failed: ${errorMsg}`);
+
+          // Return 500 to trigger retry (context may become available after previous chunk completes)
+          res.status(500).send(`Chunk context not ready: ${errorMsg}`);
+          return;
+        }
+
+        // Mark this chunk as processing
+        await markChunkProcessing(conversationId, chunkIndex);
+      }
+
+      // Update Firestore to mark processing started (for whole-file tasks or first chunk)
+      if (!isChunk || chunkIndex === 0) {
+        await db.collection('conversations').doc(conversationId).update({
+          status: 'processing',
+          processingStartedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp()
+        });
+      }
 
       console.log('[ProcessTranscription] Starting transcription pipeline...');
 
       // Execute the full transcription pipeline (shared with transcribeAudio)
-      // This is the heavy processing that was extracted from transcribeAudio
-      await executeTranscriptionPipeline({
+      // Pass chunk context so the pipeline can use speaker mappings in the future
+      const pipelineResult = await executeTranscriptionPipeline({
         conversationId,
         userId,
         filePath,
         replicateApiToken: replicateApiToken.value(),
-        huggingfaceAccessToken: huggingfaceAccessToken.value()
+        huggingfaceAccessToken: huggingfaceAccessToken.value(),
+        chunkContext: chunkContext ?? undefined
       });
 
-      console.log('[ProcessTranscription] ✅ Task completed successfully:', { conversationId });
+      // For chunk tasks, emit the next context and mark as complete
+      if (isChunk && chunkContext) {
+        // Build the next context from real pipeline results
+        const nextContext = buildNextContext(
+          chunkContext,
+          chunkIndex,
+          {
+            speakerMappings: pipelineResult.speakerMappings,
+            chunkSummary: pipelineResult.summary,
+            newTermIds: pipelineResult.termIds,
+            newTopicIds: pipelineResult.topicIds,
+            newPersonIds: pipelineResult.personIds,
+            segmentsProcessed: pipelineResult.segmentCount,
+            lastTimestampMs: pipelineResult.lastTimestampMs
+          }
+        );
+
+        await markChunkComplete(conversationId, chunkIndex, nextContext);
+
+        console.log('[ProcessTranscription] ✅ Chunk completed successfully:', {
+          conversationId,
+          chunkIndex,
+          pipelineResults: {
+            segmentsProcessed: pipelineResult.segmentCount,
+            speakerMappings: pipelineResult.speakerMappings.length,
+            terms: pipelineResult.termIds.length,
+            topics: pipelineResult.topicIds.length,
+            persons: pipelineResult.personIds.length
+          },
+          emittedContext: {
+            emittedByChunkIndex: nextContext.emittedByChunkIndex,
+            cumulativeSegments: nextContext.cumulativeSegmentCount,
+            cumulativeTerms: nextContext.knownTermIds.length,
+            cumulativeTopics: nextContext.knownTopicIds.length
+          }
+        });
+      } else {
+        console.log('[ProcessTranscription] ✅ Task completed successfully:', { conversationId });
+      }
 
       // Return 200 so Cloud Tasks doesn't retry
       res.status(200).send('OK');
@@ -116,9 +231,19 @@ export const processTranscription = onRequest(
 
       console.error('[ProcessTranscription] ❌ Task failed:', {
         conversationId,
+        chunkIndex: isChunk ? chunkIndex : undefined,
         error: errorMessage,
         stack: error instanceof Error ? error.stack : undefined
       });
+
+      // For chunk tasks, mark the chunk as failed for resume logic
+      if (isChunk) {
+        try {
+          await markChunkFailed(conversationId, chunkIndex, errorMessage);
+        } catch (markError) {
+          console.error('[ProcessTranscription] Failed to mark chunk as failed:', markError);
+        }
+      }
 
       // Update Firestore to mark processing failed
       // (executeTranscriptionPipeline may have already done this, but being safe)

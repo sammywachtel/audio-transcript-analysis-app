@@ -35,6 +35,10 @@ import {
   ChunkMetadata
 } from './chunking';
 import { validateChunkSequence } from './chunkBounds';
+import {
+  createInitialChunkStatuses
+} from './chunkContext';
+import { ChunkingMetadata, ChunkContext, ChunkPipelineResult, SpeakerMapping } from './types';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
@@ -716,6 +720,8 @@ export interface TranscriptionPipelineParams {
   replicateApiToken: string;
   huggingfaceAccessToken: string;
   audioSizeBytes?: number; // Optional - for logging only
+  /** Optional chunk context for context-aware chunk processing */
+  chunkContext?: ChunkContext;
 }
 
 /**
@@ -737,8 +743,8 @@ export interface TranscriptionPipelineParams {
  * On error, updates Firestore status to 'failed' and records metrics.
  * On abort, updates status to 'aborted' and records partial metrics.
  */
-export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<void> {
-  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes } = params;
+export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<ChunkPipelineResult> {
+  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes, chunkContext } = params;
 
   // Initialize progress tracking
   const progressManager = new ProgressManager(conversationId);
@@ -1203,6 +1209,55 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     // Mark processing as complete
     await progressManager.setComplete();
 
+    // Build result for chunk context propagation
+    // Map WhisperX speaker IDs to our canonical IDs
+    const speakerMappings: SpeakerMapping[] = whisperxSegments.speakers.map(ws => {
+      // Find the processed speaker that corresponds to this WhisperX speaker
+      // Our speakers use the same ID format, so we can match directly
+      const processedSpeaker = processedData.speakers[ws.id];
+      return {
+        originalId: ws.id,
+        canonicalId: ws.id, // Same ID preserved through processing
+        displayName: processedSpeaker?.displayName || ws.name || ws.id
+      };
+    });
+
+    // Build a summary from the title and first topic
+    const firstTopic = processedData.topics.length > 0 ? processedData.topics[0].title : '';
+    const summaryText = analysis.title
+      ? `${analysis.title}${firstTopic ? ` - ${firstTopic}` : ''}`
+      : firstTopic || 'Audio processed';
+
+    // Get the last timestamp from segments (end of last segment)
+    const lastSegment = processedData.segments.length > 0
+      ? processedData.segments[processedData.segments.length - 1]
+      : null;
+    const lastTimestampMs = lastSegment?.endMs ?? processedData.durationMs;
+
+    const pipelineResult: ChunkPipelineResult = {
+      speakerMappings,
+      summary: summaryText,
+      termIds: Object.keys(processedData.terms),
+      topicIds: processedData.topics.map(t => t.topicId),
+      personIds: processedData.people.map(p => p.personId),
+      segmentCount: processedData.segments.length,
+      lastTimestampMs
+    };
+
+    if (chunkContext) {
+      console.log('[Pipeline] Chunk context was provided - result ready for context propagation:', {
+        conversationId,
+        inputContextChunk: chunkContext.emittedByChunkIndex,
+        speakerMappingsFound: pipelineResult.speakerMappings.length,
+        segmentsProcessed: pipelineResult.segmentCount,
+        termsExtracted: pipelineResult.termIds.length,
+        topicsExtracted: pipelineResult.topicIds.length,
+        personsExtracted: pipelineResult.personIds.length
+      });
+    }
+
+    return pipelineResult;
+
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const isAbort = error instanceof AbortRequestedError;
@@ -1259,7 +1314,9 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       });
 
       await progressManager.setFailed('Aborted by user');
-      return;
+
+      // Re-throw so caller can handle (e.g., mark chunk as failed for aborted)
+      throw error;
     }
 
     // Handle general failure
@@ -1577,8 +1634,25 @@ export const transcribeAudio = onObjectFinalized(
             });
           }
 
-          // Store chunk metadata in Firestore for downstream processing
+          // Initialize chunk statuses for resumable execution
+          const initialStatuses = createInitialChunkStatuses(uploadedChunks.length);
+
+          // Store chunk metadata with status tracking (chunkingMetadata replaces old chunkMetadata)
+          const chunkingMetadata: Omit<ChunkingMetadata, 'chunkedAt'> & { chunkedAt: ReturnType<typeof FieldValue.serverTimestamp> } = {
+            chunkingEnabled: true,
+            totalChunks: uploadedChunks.length,
+            completedChunks: 0,
+            chunkStatuses: initialStatuses,
+            chunkContexts: [], // Will be populated as chunks complete
+            chunkedAt: FieldValue.serverTimestamp() as ReturnType<typeof FieldValue.serverTimestamp>,
+            originalDurationMs: chunkingResult.originalDurationMs,
+            originalStoragePath: filePath
+          };
+
           await db.collection('conversations').doc(conversationId).update({
+            // New format with status tracking
+            chunkingMetadata,
+            // Keep legacy format for backward compatibility during transition
             chunkMetadata: {
               chunked: true,
               chunks: uploadedChunks,
@@ -1590,13 +1664,15 @@ export const transcribeAudio = onObjectFinalized(
             updatedAt: FieldValue.serverTimestamp()
           });
 
-          console.log('[Transcribe] Chunk metadata saved to Firestore:', {
+          console.log('[Transcribe] Chunk metadata with status tracking saved:', {
             conversationId,
-            chunkCount: uploadedChunks.length
+            chunkCount: uploadedChunks.length,
+            initialStatuses: initialStatuses.map(s => ({ index: s.chunkIndex, status: s.status }))
           });
 
           // Create one Cloud Task per chunk
           // Stagger scheduling to avoid thundering herd
+          // Note: First chunk uses initial context, subsequent chunks load from Firestore
           const taskPromises = uploadedChunks.map(async (chunk, index) => {
             const payload = {
               conversationId,
@@ -1604,7 +1680,12 @@ export const transcribeAudio = onObjectFinalized(
               filePath: chunk.chunkStoragePath,
               chunkIndex: chunk.chunkIndex,
               totalChunks: chunk.totalChunks,
-              chunkMetadata: chunk
+              chunkMetadata: chunk,
+              // Include timing metadata for offset calculations
+              chunkStartMs: chunk.startMs,
+              chunkEndMs: chunk.endMs,
+              overlapBeforeMs: chunk.overlapBeforeMs,
+              overlapAfterMs: chunk.overlapAfterMs
             };
 
             const task = {
