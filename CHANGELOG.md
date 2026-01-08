@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Replicate API calls configured with 3-minute timeout via custom fetch wrapper
   - Gateway errors (502/503/504) now trigger automatic retries in WhisperX transcription
 - **Firestore Race Condition** - Storage trigger now uses `set()` with merge instead of `update()`, preventing errors when file upload completes before frontend creates document
+- **Chunk Processing Retry Errors** - Fixed Firestore error when retrying failed chunks
+  - Chunk status updates now properly omit error field instead of setting it to `undefined`
+  - Prevents "Cannot use undefined as a Firestore value" errors during chunk retry operations
 
 ## [1.8.0-beta] - 2026-01-05
 
