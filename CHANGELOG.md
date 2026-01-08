@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chunk Processing Retry Errors** - Fixed Firestore error when retrying failed chunks
   - Chunk status updates now properly omit error field instead of setting it to `undefined`
   - Prevents "Cannot use undefined as a Firestore value" errors during chunk retry operations
+- **WhisperX JSON Parsing Failures** - Large audio files now chunk based on file size, not just duration
+  - Added 20MB file size threshold for chunking (in addition to 30-minute duration threshold)
+  - Prevents WhisperX from returning massive JSON responses that exceed parser buffer limits
+  - High-quality short audio (e.g., 46MB / 15 minutes) now properly chunks before processing
 
 ## [1.8.0-beta] - 2026-01-05
 
