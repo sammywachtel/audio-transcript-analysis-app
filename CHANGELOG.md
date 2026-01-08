@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Next chunk loads previous context to maintain diarization continuity
   - Firestore transactions ensure atomic status updates even with concurrent chunk tasks
   - Resumable execution: failed/pending chunks can be retried with correct state bootstrap
+- **Chunk Merge System** - Automatic reassembly of chunked transcripts into a unified document
+  - Segments deduplicated in overlap regions using "later chunk wins" strategy
+  - Timestamps normalized from chunk-local to original audio timeline for accurate playback sync
+  - Speakers, terms, topics, and people merged deterministically across all chunks
+  - Cloud Task-based merge job with `mergeTaskEnqueued` guard to prevent duplicate merges
+  - Conversation status transitions: `chunking` → `merging` → `complete`
 
 ### Changed
 - **Queue-Driven Transcription Architecture** - Large audio files (46MB+) now process reliably without timeouts

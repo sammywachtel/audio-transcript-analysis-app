@@ -29,7 +29,7 @@ service cloud.firestore {
       return data.keys().hasAll(['conversationId', 'userId', 'title', 'createdAt', 'status'])
         && data.userId is string
         && data.title is string
-        && data.status in ['processing', 'needs_review', 'complete', 'failed'];
+        && data.status in ['processing', 'chunking', 'merging', 'needs_review', 'complete', 'failed', 'aborted'];
     }
 
     // Users collection - profile data
@@ -75,6 +75,16 @@ service cloud.firestore {
         // Note: update not allowed - messages are immutable once created
         allow delete: if isAuthenticated()
           && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+      }
+
+      // Chunks subcollection - intermediate artifacts during chunk processing
+      match /chunks/{chunkIndex} {
+        // Users can read chunks for their own conversations
+        allow read: if isAuthenticated()
+          && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+
+        // Only Cloud Functions can write chunks
+        allow write: if false;
       }
     }
 

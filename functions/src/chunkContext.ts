@@ -207,23 +207,36 @@ export async function markChunkProcessing(
 }
 
 /**
+ * Result from markChunkComplete indicating if merge should be triggered.
+ */
+export interface ChunkCompleteResult {
+  /** Whether all chunks are now complete */
+  allComplete: boolean;
+  /** Whether a merge task should be enqueued */
+  shouldEnqueueMerge: boolean;
+}
+
+/**
  * Mark a chunk as completed and save its emitted context.
  *
  * This is the critical operation for context propagation - it:
  * 1. Updates the chunk status to 'complete'
  * 2. Stores the context this chunk emitted for the next chunk
  * 3. Increments the completedChunks counter
+ * 4. Checks if all chunks are complete and merge should be triggered
  *
- * Uses transaction to ensure atomicity.
+ * Uses transaction to ensure atomicity and prevent duplicate merge enqueuing.
+ *
+ * @returns Result indicating if merge task should be enqueued
  */
 export async function markChunkComplete(
   conversationId: string,
   chunkIndex: number,
   emittedContext: ChunkContext
-): Promise<void> {
+): Promise<ChunkCompleteResult> {
   const docRef = db.collection('conversations').doc(conversationId);
 
-  await db.runTransaction(async (transaction: Transaction) => {
+  return db.runTransaction(async (transaction: Transaction) => {
     const doc = await transaction.get(docRef);
 
     if (!doc.exists) {
@@ -263,21 +276,37 @@ export async function markChunkComplete(
 
     // Calculate completed count
     const completedCount = statuses.filter(s => s.status === 'complete').length;
+    const allComplete = completedCount === chunkingMeta.totalChunks;
 
-    transaction.update(docRef, {
+    // Check if we should enqueue merge task (all complete AND not already enqueued)
+    const shouldEnqueueMerge = allComplete && !chunkingMeta.mergeTaskEnqueued;
+
+    // Build update object
+    const updates: Record<string, unknown> = {
       'chunkingMetadata.chunkStatuses': statuses,
       'chunkingMetadata.chunkContexts': contexts,
       'chunkingMetadata.completedChunks': completedCount,
       updatedAt: FieldValue.serverTimestamp()
-    });
+    };
+
+    // If we're triggering merge, set the guard flag atomically
+    if (shouldEnqueueMerge) {
+      updates['chunkingMetadata.mergeTaskEnqueued'] = true;
+      updates['chunkingMetadata.mergeEnqueuedAt'] = new Date().toISOString();
+    }
+
+    transaction.update(docRef, updates);
 
     console.log('[ChunkContext] Marked chunk complete:', {
       conversationId,
       chunkIndex,
       completedCount,
       totalChunks: chunkingMeta.totalChunks,
-      isAllComplete: completedCount === chunkingMeta.totalChunks
+      allComplete,
+      shouldEnqueueMerge
     });
+
+    return { allComplete, shouldEnqueueMerge };
   });
 }
 
