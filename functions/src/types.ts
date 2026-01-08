@@ -60,7 +60,7 @@ export interface Conversation {
   updatedAt: string;
   durationMs: number;
   audioUrl?: string;
-  status: 'processing' | 'needs_review' | 'complete' | 'failed' | 'aborted';
+  status: 'processing' | 'chunking' | 'merging' | 'needs_review' | 'complete' | 'failed' | 'aborted';
   abortRequested?: boolean;
   speakers: Record<string, Speaker>;
   segments: Segment[];
@@ -202,6 +202,14 @@ export interface ChunkingMetadata {
   originalDurationMs: number;
   /** Original audio storage path */
   originalStoragePath: string;
+  /** Guard flag to prevent duplicate merge task enqueueing */
+  mergeTaskEnqueued?: boolean;
+  /** When merge task was enqueued (ISO timestamp) */
+  mergeEnqueuedAt?: string;
+  /** When merge started (ISO timestamp) */
+  mergeStartedAt?: string;
+  /** When merge completed (ISO timestamp) */
+  mergedAt?: string;
 }
 
 /**
@@ -223,4 +231,54 @@ export interface ChunkPipelineResult {
   segmentCount: number;
   /** Last timestamp processed in this chunk (ms) */
   lastTimestampMs: number;
+}
+
+/**
+ * Chunk artifact stored in conversations/{id}/chunks/{chunkIndex}.
+ * Contains the full pipeline results for one chunk, to be merged later.
+ */
+export interface ChunkArtifact {
+  /** Conversation ID this chunk belongs to */
+  conversationId: string;
+  /** User ID (for security) */
+  userId: string;
+  /** Zero-indexed chunk number */
+  chunkIndex: number;
+  /** Total number of chunks in this conversation */
+  totalChunks: number;
+
+  // Pipeline results for this chunk
+  /** Transcript segments (with chunk-local timestamps initially) */
+  segments: Segment[];
+  /** Speakers discovered in this chunk */
+  speakers: Record<string, Speaker>;
+  /** Terms extracted in this chunk */
+  terms: Record<string, Term>;
+  /** Term occurrences in this chunk */
+  termOccurrences: TermOccurrence[];
+  /** Topics identified in this chunk */
+  topics: Topic[];
+  /** People mentioned in this chunk */
+  people: Person[];
+
+  // Timing info for merge deduplication
+  chunkBounds: {
+    /** Start time in original audio (ms) */
+    startMs: number;
+    /** End time in original audio (ms) */
+    endMs: number;
+    /** Overlap with previous chunk (ms) */
+    overlapBeforeMs: number;
+    /** Overlap with next chunk (ms) */
+    overlapAfterMs: number;
+  };
+
+  /** Context emitted for the next chunk */
+  emittedContext: ChunkContext;
+
+  // Metadata
+  /** When this chunk artifact was created */
+  createdAt: string;
+  /** Storage path to chunk audio file */
+  storagePath: string;
 }

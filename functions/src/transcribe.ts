@@ -38,7 +38,7 @@ import { validateChunkSequence } from './chunkBounds';
 import {
   createInitialChunkStatuses
 } from './chunkContext';
-import { ChunkingMetadata, ChunkContext, ChunkPipelineResult, SpeakerMapping } from './types';
+import { ChunkingMetadata, ChunkContext, ChunkPipelineResult, SpeakerMapping, ChunkArtifact } from './types';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
@@ -722,6 +722,15 @@ export interface TranscriptionPipelineParams {
   audioSizeBytes?: number; // Optional - for logging only
   /** Optional chunk context for context-aware chunk processing */
   chunkContext?: ChunkContext;
+  /** Optional chunk metadata - when present, indicates this is a chunk task */
+  chunkMetadata?: {
+    chunkIndex: number;
+    totalChunks: number;
+    startMs: number;
+    endMs: number;
+    overlapBeforeMs: number;
+    overlapAfterMs: number;
+  };
 }
 
 /**
@@ -744,7 +753,8 @@ export interface TranscriptionPipelineParams {
  * On abort, updates status to 'aborted' and records partial metrics.
  */
 export async function executeTranscriptionPipeline(params: TranscriptionPipelineParams): Promise<ChunkPipelineResult> {
-  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes, chunkContext } = params;
+  const { conversationId, userId, filePath, replicateApiToken, huggingfaceAccessToken, audioSizeBytes, chunkContext, chunkMetadata } = params;
+  const isChunkTask = !!chunkMetadata;
 
   // Initialize progress tracking
   const progressManager = new ProgressManager(conversationId);
@@ -1103,21 +1113,67 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
     // Determine alignment status
     const finalAlignmentStatus = usedGeminiFallback ? 'fallback' : 'aligned';
 
-    // Save results to Firestore
+    // Save results to Firestore (different logic for chunks vs whole files)
     console.debug('[Pipeline] Saving results to Firestore...');
     const firestoreStartTime = Date.now();
-    await retryWithBackoff(
-      () => db.collection('conversations').doc(conversationId).update({
-        ...processedData,
-        status: 'complete',
-        alignmentStatus: finalAlignmentStatus,
-        alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
-        abortRequested: false,
-        audioStoragePath: filePath,
-        updatedAt: FieldValue.serverTimestamp()
-      }),
-      'Firestore save results'
-    );
+
+    if (isChunkTask && chunkMetadata) {
+      // For chunk tasks, save as a ChunkArtifact in the subcollection
+      // The merge job will stitch these together later
+      const chunkArtifact: ChunkArtifact = {
+        conversationId,
+        userId,
+        chunkIndex: chunkMetadata.chunkIndex,
+        totalChunks: chunkMetadata.totalChunks,
+        segments: processedData.segments,
+        speakers: processedData.speakers,
+        terms: processedData.terms,
+        termOccurrences: processedData.termOccurrences,
+        topics: processedData.topics,
+        people: processedData.people,
+        chunkBounds: {
+          startMs: chunkMetadata.startMs,
+          endMs: chunkMetadata.endMs,
+          overlapBeforeMs: chunkMetadata.overlapBeforeMs,
+          overlapAfterMs: chunkMetadata.overlapAfterMs
+        },
+        emittedContext: chunkContext!, // Will be replaced by processTranscription with actual emitted context
+        createdAt: new Date().toISOString(),
+        storagePath: filePath
+      };
+
+      await retryWithBackoff(
+        () => db
+          .collection('conversations')
+          .doc(conversationId)
+          .collection('chunks')
+          .doc(String(chunkMetadata.chunkIndex))
+          .set(chunkArtifact),
+        'Firestore save chunk artifact'
+      );
+
+      console.log('[Pipeline] ✅ Chunk artifact saved:', {
+        conversationId,
+        chunkIndex: chunkMetadata.chunkIndex,
+        totalChunks: chunkMetadata.totalChunks,
+        segmentCount: processedData.segments.length
+      });
+    } else {
+      // For whole-file tasks, update the main conversation document as before
+      await retryWithBackoff(
+        () => db.collection('conversations').doc(conversationId).update({
+          ...processedData,
+          status: 'complete',
+          alignmentStatus: finalAlignmentStatus,
+          alignmentError: usedGeminiFallback ? 'WhisperX failed, used Gemini fallback' : null,
+          abortRequested: false,
+          audioStoragePath: filePath,
+          updatedAt: FieldValue.serverTimestamp()
+        }),
+        'Firestore save results'
+      );
+    }
+
     const firestoreDurationMs = Date.now() - firestoreStartTime;
 
     const totalDurationMs = Date.now() - downloadStartTime;

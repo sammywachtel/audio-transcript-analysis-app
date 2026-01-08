@@ -54,6 +54,7 @@ export const bucket = getStorage().bucket();
 // Export cloud functions
 export { transcribeAudio } from './transcribe';
 export { processTranscription } from './processTranscription';
+export { processMerge } from './chunkMerge';
 export { getSignedAudioUrl } from './getAudioUrl';
 export { chatWithConversation } from './chat';
 

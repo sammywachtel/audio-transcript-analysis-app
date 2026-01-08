@@ -37,6 +37,56 @@ import {
 import { ChunkContext } from './types';
 import { ChunkMetadata } from './chunking';
 
+/**
+ * Enqueue a merge task to Cloud Tasks.
+ * Called after all chunks complete to trigger final merge.
+ */
+async function enqueueMergeTask(conversationId: string): Promise<void> {
+  console.log('[ProcessTranscription] Enqueueing merge task:', { conversationId });
+
+  const { CloudTasksClient } = await import('@google-cloud/tasks');
+  const tasksClient = new CloudTasksClient();
+
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (!project) {
+    throw new Error('GCP project ID not found in environment');
+  }
+
+  const location = 'us-central1';
+  const queue = 'transcription-queue';
+  const parent = tasksClient.queuePath(project, location, queue);
+
+  const functionName = 'processMerge';
+  const processMergeUrl = `https://${location}-${project}.cloudfunctions.net/${functionName}`;
+
+  const payload = { conversationId };
+
+  const task = {
+    httpRequest: {
+      httpMethod: 'POST' as const,
+      url: processMergeUrl,
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+      oidcToken: { serviceAccountEmail: `${project}@appspot.gserviceaccount.com` }
+    },
+    scheduleTime: { seconds: Math.floor(Date.now() / 1000) + 5 }, // 5 second delay
+    dispatchDeadline: { seconds: 600 } // 10 minutes (enough for merge)
+  };
+
+  console.log('[ProcessTranscription] Creating merge task:', {
+    conversationId,
+    queue: `${location}/${queue}`,
+    targetUrl: processMergeUrl
+  });
+
+  const [createdTask] = await tasksClient.createTask({ parent, task });
+
+  console.log('[ProcessTranscription] ✅ Merge task enqueued:', {
+    conversationId,
+    taskName: createdTask.name
+  });
+}
+
 // Define secrets (same as transcribeAudio - needed for heavy processing)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
 const huggingfaceAccessToken = defineSecret('HUGGINGFACE_ACCESS_TOKEN');
@@ -173,14 +223,22 @@ export const processTranscription = onRequest(
       console.log('[ProcessTranscription] Starting transcription pipeline...');
 
       // Execute the full transcription pipeline (shared with transcribeAudio)
-      // Pass chunk context so the pipeline can use speaker mappings in the future
+      // Pass chunk context and metadata for chunk-aware processing
       const pipelineResult = await executeTranscriptionPipeline({
         conversationId,
         userId,
         filePath,
         replicateApiToken: replicateApiToken.value(),
         huggingfaceAccessToken: huggingfaceAccessToken.value(),
-        chunkContext: chunkContext ?? undefined
+        chunkContext: chunkContext ?? undefined,
+        chunkMetadata: isChunk ? {
+          chunkIndex,
+          totalChunks: payload.totalChunks!,
+          startMs: payload.chunkStartMs!,
+          endMs: payload.chunkEndMs!,
+          overlapBeforeMs: payload.overlapBeforeMs!,
+          overlapAfterMs: payload.overlapAfterMs!
+        } : undefined
       });
 
       // For chunk tasks, emit the next context and mark as complete
@@ -200,7 +258,16 @@ export const processTranscription = onRequest(
           }
         );
 
-        await markChunkComplete(conversationId, chunkIndex, nextContext);
+        // Update the chunk artifact with the actual emitted context
+        await db
+          .collection('conversations')
+          .doc(conversationId)
+          .collection('chunks')
+          .doc(String(chunkIndex))
+          .update({ emittedContext: nextContext });
+
+        // Mark chunk complete and check if merge should be triggered
+        const result = await markChunkComplete(conversationId, chunkIndex, nextContext);
 
         console.log('[ProcessTranscription] ✅ Chunk completed successfully:', {
           conversationId,
@@ -217,8 +284,24 @@ export const processTranscription = onRequest(
             cumulativeSegments: nextContext.cumulativeSegmentCount,
             cumulativeTerms: nextContext.knownTermIds.length,
             cumulativeTopics: nextContext.knownTopicIds.length
-          }
+          },
+          allComplete: result.allComplete,
+          shouldEnqueueMerge: result.shouldEnqueueMerge
         });
+
+        // If all chunks complete, enqueue merge task and update status
+        if (result.shouldEnqueueMerge) {
+          console.log('[ProcessTranscription] 🔀 All chunks complete - enqueueing merge task');
+
+          // Enqueue merge task
+          await enqueueMergeTask(conversationId);
+
+          // Update conversation status to 'merging'
+          await db.collection('conversations').doc(conversationId).update({
+            status: 'merging',
+            updatedAt: FieldValue.serverTimestamp()
+          });
+        }
       } else {
         console.log('[ProcessTranscription] ✅ Task completed successfully:', { conversationId });
       }
