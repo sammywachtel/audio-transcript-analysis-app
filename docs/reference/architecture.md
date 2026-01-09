@@ -459,6 +459,109 @@ When a chunk fails and Cloud Tasks retries:
 
 This ensures chunks are processed in dependency order even with concurrent execution.
 
+### Processing Modes (Parallel vs Sequential)
+
+The system supports two processing modes for chunked uploads, controlled by the `processingMode` field:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    Processing Mode Comparison                            │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  PARALLEL MODE (Default)                 SEQUENTIAL MODE (Legacy)        │
+│  ════════════════════════                ═══════════════════════         │
+│                                                                          │
+│  Chunk 0  ──▶ Process ──▶ Complete      Chunk 0 ──▶ Process ──▶ Complete │
+│  Chunk 1  ──▶ Process ──▶ Complete             │                        │
+│  Chunk 2  ──▶ Process ──▶ Complete             ▼                        │
+│  (All run simultaneously)               Chunk 1 ◀─ Load context          │
+│         │                                      │                        │
+│         ▼                                      ▼                        │
+│  ┌─────────────────────┐                      Process ──▶ Complete       │
+│  │ Speaker Reconcile   │                             │                   │
+│  │ (merge-time)        │                             ▼                   │
+│  └─────────────────────┘                Chunk 2 ◀─ Load context          │
+│         │                                      │                        │
+│         ▼                                      ▼                        │
+│      MERGE                                   Process ──▶ Complete        │
+│                                                    │                    │
+│                                                    ▼                    │
+│                                                 MERGE                    │
+│                                                                          │
+│  ✓ Faster (all chunks process at once)    ✓ Consistent speaker IDs       │
+│  ✓ Best for long files (1hr+ audio)       ✓ No post-hoc reconciliation   │
+│  ⚡ ~60% faster for 6-chunk files          ⏱ ~60% slower (sequential wait) │
+│                                                                          │
+│  Speaker reconciliation at merge uses:    Context propagation ensures:   │
+│  - Inferred names from introductions      - Speaker IDs inherited        │
+│  - Topic/term signatures                  - No ID conflicts at merge     │
+│  - Segment counts per speaker             - Cumulative metadata           │
+│  - Sample quotes for fingerprinting       - Resume-safe state            │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Parallel Mode** (default for new uploads):
+- All chunks start processing immediately after upload
+- Each chunk uses a fresh initial context (no waiting)
+- Speaker IDs may differ across chunks (SPEAKER_00 in chunk 0 ≠ SPEAKER_00 in chunk 3)
+- `SpeakerSignature` fingerprints stored with each chunk artifact
+- Merge function reconciles speakers using signatures (future scope)
+
+**Sequential Mode** (legacy behavior):
+- Chunks wait for predecessor to complete before starting
+- Each chunk loads context from previous chunk
+- Speaker IDs remain consistent across all chunks
+- No reconciliation needed at merge time
+- Slower but deterministic speaker tracking
+
+**UI Selection:**
+
+Users choose the processing mode in the upload modal:
+- "Fast" button → `processingMode: 'parallel'`
+- "Legacy" button → `processingMode: 'sequential'`
+
+**Data Flow:**
+
+```
+Upload Modal → createMockConversation(file, { processingMode })
+           → storageService.uploadAudio(..., { processingMode })
+                   ↓ (customMetadata)
+           → transcribeAudio (reads from Storage metadata)
+                   ↓ (Firestore + Cloud Task payload)
+           → processTranscription (branches on mode)
+                   ↓
+           → parallel: createInitialChunkContext()
+           → sequential: loadChunkContext(conversationId, chunkIndex)
+```
+
+**Key Files:**
+
+- `src/pages/Library.tsx` - Upload modal with mode toggle
+- `src/utils/index.ts` - `createMockConversation` with options
+- `src/services/storageService.ts` - Passes mode via customMetadata
+- `functions/src/transcribe.ts` - Reads mode, propagates to Firestore/tasks
+- `functions/src/processTranscription.ts` - Branches on mode
+- `functions/src/chunkContext.ts` - `createInitialChunkContext()` for parallel
+
+**Speaker Signature (Parallel Mode):**
+
+When `processingMode === 'parallel'`, each chunk stores speaker signatures for merge-time reconciliation:
+
+```typescript
+interface SpeakerSignature {
+  speakerId: string;       // "SPEAKER_00" (local to this chunk)
+  chunkIndex: number;      // Which chunk this signature belongs to
+  inferredName?: string;   // Name if speaker introduced themselves
+  topicSignatures: string[]; // Topic IDs where speaker spoke
+  termSignatures: string[];  // Term keys used by this speaker
+  segmentCount: number;    // Segments contributed by speaker
+  sampleQuote: string;     // First ~100 chars for fingerprinting
+}
+```
+
+Signatures are stored in `conversations/{id}/chunks/{chunkIndex}.chunkSpeakerSignatures`.
+
 ### Alignment Module (HARDY Algorithm)
 
 The Cloud Function includes an integrated alignment module that provides precise timestamps using WhisperX via Replicate:

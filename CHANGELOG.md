@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Parallel Chunk Processing Mode** - New Fast/Legacy toggle for large file uploads
+  - Fast mode (default): Chunks process independently in parallel for faster results
+  - Legacy mode: Chunks process sequentially, maintaining speaker ID continuity across chunks
+  - Upload modal includes explanatory copy about trade-offs between speed and accuracy
+  - `processingMode` persists through Storage metadata, Firestore, and Cloud Task payloads
+  - Speaker signatures (`chunkSpeakerSignatures`) captured per chunk for downstream reconciliation
+  - Backward compatible: existing uploads without mode default to appropriate behavior
 - **Audio Chunking for Large Files** - Files over 30 minutes are now automatically split into 10-15 minute chunks
   - FFmpeg-based silence detection finds natural break points (using `-af silencedetect=n=-30dB:d=0.5`)
   - Chunks include 5-10 second overlap to prevent word truncation at boundaries

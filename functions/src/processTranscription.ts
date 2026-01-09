@@ -33,9 +33,10 @@ import {
   markChunkComplete,
   markChunkFailed,
   buildNextContext,
-  sanitizeForFirestore
+  sanitizeForFirestore,
+  createInitialChunkContext
 } from './chunkContext';
-import { ChunkContext } from './types';
+import { ChunkContext, ProcessingMode, SpeakerSignature } from './types';
 import { ChunkMetadata } from './chunking';
 
 /**
@@ -100,6 +101,13 @@ interface TranscriptionTaskPayload {
   conversationId: string;
   userId: string;
   filePath: string;
+  /**
+   * Processing mode for chunked uploads.
+   * - 'parallel': Chunks run independently (fast, speaker reconciliation at merge)
+   * - 'sequential': Chunks wait for predecessor context (legacy, consistent speaker IDs)
+   * Defaults to 'parallel' if not specified.
+   */
+  processingMode?: ProcessingMode;
   // Chunk-specific fields (present for chunked audio processing)
   chunkIndex?: number;
   totalChunks?: number;
@@ -170,6 +178,8 @@ export const processTranscription = onRequest(
     const { conversationId, userId, filePath } = payload;
     const isChunk = isChunkTask(payload);
     const chunkIndex = payload.chunkIndex ?? -1;
+    // Default to parallel mode for new uploads (faster for users)
+    const processingMode: ProcessingMode = payload.processingMode ?? 'parallel';
 
     // Chunk context for propagation (only used for chunk tasks)
     let chunkContext: ChunkContext | null = null;
@@ -182,46 +192,60 @@ export const processTranscription = onRequest(
           chunkIndex,
           totalChunks: payload.totalChunks,
           chunkStartMs: payload.chunkStartMs,
-          chunkEndMs: payload.chunkEndMs
+          chunkEndMs: payload.chunkEndMs,
+          processingMode
         });
 
-        // Load context from previous chunk (or initial context for chunk 0)
-        try {
-          chunkContext = await loadChunkContext(conversationId, chunkIndex);
-          console.log('[ProcessTranscription] Loaded chunk context:', {
-            conversationId,
-            chunkIndex,
-            previousChunk: chunkContext.emittedByChunkIndex,
-            speakerCount: chunkContext.speakerMap.length,
-            cumulativeSegments: chunkContext.cumulativeSegmentCount
-          });
-        } catch (contextError) {
-          // If we can't load context, this chunk can't proceed yet
-          const errorMsg = contextError instanceof Error ? contextError.message : String(contextError);
-
-          // Distinguish between "waiting" (retriable) vs "predecessor failed" (permanent)
-          // Both "still processing" and "still pending" are retriable states
-          const isRetriable = errorMsg.includes('still processing') || errorMsg.includes('still pending');
-
-          if (isRetriable) {
-            // Previous chunk hasn't completed yet - this is retriable, NOT a failure
-            // Don't mark as failed, just return 500 to let Cloud Tasks retry
-            console.log('[ProcessTranscription] Chunk waiting on predecessor:', {
+        // Context loading differs by processing mode:
+        // - Sequential: Wait for predecessor, load its emitted context
+        // - Parallel: Use fresh initial context (no waiting)
+        if (processingMode === 'sequential') {
+          // SEQUENTIAL MODE: Load context from previous chunk (blocks until predecessor completes)
+          try {
+            chunkContext = await loadChunkContext(conversationId, chunkIndex);
+            console.log('[ProcessTranscription] [Sequential] Loaded chunk context:', {
               conversationId,
               chunkIndex,
-              reason: errorMsg
+              previousChunk: chunkContext.emittedByChunkIndex,
+              speakerCount: chunkContext.speakerMap.length,
+              cumulativeSegments: chunkContext.cumulativeSegmentCount
             });
-            res.status(500).send(`Chunk ${chunkIndex} waiting on predecessor - will retry`);
+          } catch (contextError) {
+            // If we can't load context, this chunk can't proceed yet
+            const errorMsg = contextError instanceof Error ? contextError.message : String(contextError);
+
+            // Distinguish between "waiting" (retriable) vs "predecessor failed" (permanent)
+            // Both "still processing" and "still pending" are retriable states
+            const isRetriable = errorMsg.includes('still processing') || errorMsg.includes('still pending');
+
+            if (isRetriable) {
+              // Previous chunk hasn't completed yet - this is retriable, NOT a failure
+              // Don't mark as failed, just return 500 to let Cloud Tasks retry
+              console.log('[ProcessTranscription] [Sequential] Chunk waiting on predecessor:', {
+                conversationId,
+                chunkIndex,
+                reason: errorMsg
+              });
+              res.status(500).send(`Chunk ${chunkIndex} waiting on predecessor - will retry`);
+              return;
+            }
+
+            // Previous chunk actually failed - this is a permanent failure
+            console.error('[ProcessTranscription] [Sequential] Failed to load chunk context:', errorMsg);
+            await markChunkFailed(conversationId, chunkIndex, `Context load failed: ${errorMsg}`);
+
+            // Return 500 to trigger retry (in case it's a transient issue)
+            res.status(500).send(`Chunk context not ready: ${errorMsg}`);
             return;
           }
-
-          // Previous chunk actually failed - this is a permanent failure
-          console.error('[ProcessTranscription] Failed to load chunk context:', errorMsg);
-          await markChunkFailed(conversationId, chunkIndex, `Context load failed: ${errorMsg}`);
-
-          // Return 500 to trigger retry (in case it's a transient issue)
-          res.status(500).send(`Chunk context not ready: ${errorMsg}`);
-          return;
+        } else {
+          // PARALLEL MODE: Use fresh initial context - no waiting for predecessors!
+          // Each chunk processes independently, speaker reconciliation happens at merge
+          chunkContext = createInitialChunkContext();
+          console.log('[ProcessTranscription] [Parallel] Using initial context (no predecessor wait):', {
+            conversationId,
+            chunkIndex
+          });
         }
 
         // Mark this chunk as processing
@@ -279,13 +303,31 @@ export const processTranscription = onRequest(
         // (e.g., voiceSignature in speaker mappings is optional and may be undefined)
         const sanitizedContext = sanitizeForFirestore(nextContext);
 
-        // Update the chunk artifact with the actual emitted context
+        // Build chunk artifact update
+        // For parallel mode, include speaker signatures for merge reconciliation
+        const chunkArtifactUpdate: { emittedContext: ChunkContext; chunkSpeakerSignatures?: SpeakerSignature[] } = {
+          emittedContext: sanitizedContext
+        };
+
+        // Store speaker signatures for merge-time reconciliation (useful in both modes)
+        // These help the merge function correlate speakers across independently-processed chunks
+        if (pipelineResult.chunkSpeakerSignatures) {
+          chunkArtifactUpdate.chunkSpeakerSignatures = pipelineResult.chunkSpeakerSignatures;
+          console.log('[ProcessTranscription] Storing speaker signatures:', {
+            conversationId,
+            chunkIndex,
+            signatureCount: pipelineResult.chunkSpeakerSignatures.length,
+            processingMode
+          });
+        }
+
+        // Update the chunk artifact with the actual emitted context (and speaker signatures for parallel)
         await db
           .collection('conversations')
           .doc(conversationId)
           .collection('chunks')
           .doc(String(chunkIndex))
-          .update({ emittedContext: sanitizedContext });
+          .update(chunkArtifactUpdate);
 
         // Mark chunk complete and check if merge should be triggered
         const result = await markChunkComplete(conversationId, chunkIndex, sanitizedContext);

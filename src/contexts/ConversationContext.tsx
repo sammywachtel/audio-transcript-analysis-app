@@ -147,12 +147,17 @@ export const ConversationProvider: React.FC<{ children: ReactNode }> = ({ childr
       let audioStoragePath: string | undefined;
 
       // Upload audio to Firebase Storage if provided
+      // Pass processingMode to Storage metadata so Cloud Function can read it on trigger
       if (audioFile) {
-        console.log('[ConversationContext] Uploading audio to Firebase Storage...');
+        console.log('[ConversationContext] Uploading audio to Firebase Storage...', {
+          processingMode: conversation.processingMode
+        });
         const result = await storageService.uploadAudio(
           user.uid,
           conversation.conversationId,
-          audioFile
+          audioFile,
+          undefined, // No progress callback
+          { processingMode: conversation.processingMode }
         );
         audioStoragePath = result.storagePath;
         // Note: We don't need to store the cancel function here since we wait for completion

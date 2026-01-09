@@ -8,6 +8,15 @@ import {
   UploadTask
 } from 'firebase/storage';
 import { storage } from '@/config/firebase-config';
+import { ProcessingMode } from '@/config/types';
+
+/**
+ * Options for audio upload.
+ */
+export interface UploadAudioOptions {
+  /** Processing mode for chunked uploads - 'parallel' (fast) or 'sequential' (legacy). */
+  processingMode?: ProcessingMode;
+}
 
 /**
  * StorageService - Handles Firebase Storage operations for audio files
@@ -38,30 +47,38 @@ export class StorageService {
   }
 
   /**
-   * Upload an audio file to Firebase Storage with real-time progress tracking
-   * Returns the storage path and a cancel function
+   * Upload an audio file to Firebase Storage with real-time progress tracking.
+   * Returns the storage path and a cancel function.
+   *
+   * The processingMode is stored in customMetadata so the Cloud Function can
+   * read it even before the Firestore doc is written (important for race conditions).
    */
   async uploadAudio(
     userId: string,
     conversationId: string,
     file: File,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    options: UploadAudioOptions = {}
   ): Promise<{ storagePath: string; cancel: () => void }> {
+    const { processingMode = 'parallel' } = options;
     const storagePath = this.getAudioPath(userId, conversationId, file.name);
     const storageRef = ref(storage, storagePath);
 
     console.log('[Storage] Uploading audio:', {
       path: storagePath,
       size: file.size,
-      type: file.type
+      type: file.type,
+      processingMode
     });
 
     // Use uploadBytesResumable for real progress tracking
+    // Include processingMode in metadata so Cloud Function can read it on trigger
     const uploadTask: UploadTask = uploadBytesResumable(storageRef, file, {
       contentType: file.type || 'audio/mpeg',
       customMetadata: {
         originalFileName: file.name,
-        uploadedAt: new Date().toISOString()
+        uploadedAt: new Date().toISOString(),
+        processingMode // Stored in metadata for Cloud Function to read
       }
     });
 

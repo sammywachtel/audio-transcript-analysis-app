@@ -37,6 +37,9 @@ interface ConversationDoc {
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;      // Reason for fallback if applicable
 
+  // Processing Mode (Chunked Uploads)
+  processingMode?: 'parallel' | 'sequential';  // Controls chunk execution strategy
+
   // Abort Control
   abortRequested?: boolean;     // User requested processing stop
 
@@ -468,6 +471,7 @@ interface Conversation {
   status: 'queued' | 'processing' | 'complete' | 'failed' | 'aborted';
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;    // Reason for fallback
+  processingMode?: 'parallel' | 'sequential';  // Chunk execution strategy
   queuedAt?: string;          // ISO timestamp when Cloud Task enqueued
   processingStartedAt?: string; // ISO timestamp when processing began
   speakers: Record<string, Speaker>;
@@ -478,6 +482,10 @@ interface Conversation {
   people: Person[];
 }
 ```
+
+**Processing Mode Values:**
+- `'parallel'` (default): Chunks process independently and concurrently. Faster for long files, but requires speaker reconciliation at merge time. Best for most use cases.
+- `'sequential'`: Chunks wait for predecessor to complete before starting. Slower but maintains consistent speaker IDs across chunks without reconciliation.
 
 ### Speaker
 
