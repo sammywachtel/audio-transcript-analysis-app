@@ -195,14 +195,29 @@ export const processTranscription = onRequest(
             cumulativeSegments: chunkContext.cumulativeSegmentCount
           });
         } catch (contextError) {
-          // If we can't load context, this chunk can't proceed
+          // If we can't load context, this chunk can't proceed yet
           const errorMsg = contextError instanceof Error ? contextError.message : String(contextError);
-          console.error('[ProcessTranscription] Failed to load chunk context:', errorMsg);
 
-          // Mark chunk as failed (so resume logic knows it needs re-processing)
+          // Distinguish between "waiting" (retriable) vs "predecessor failed" (permanent)
+          const isWaitingOnProcessing = errorMsg.includes('still processing');
+
+          if (isWaitingOnProcessing) {
+            // Previous chunk is still processing - this is retriable, NOT a failure
+            // Don't mark as failed, just return 500 to let Cloud Tasks retry
+            console.log('[ProcessTranscription] Chunk waiting on predecessor:', {
+              conversationId,
+              chunkIndex,
+              reason: errorMsg
+            });
+            res.status(500).send(`Chunk ${chunkIndex} waiting on predecessor - will retry`);
+            return;
+          }
+
+          // Previous chunk actually failed - this is a permanent failure
+          console.error('[ProcessTranscription] Failed to load chunk context:', errorMsg);
           await markChunkFailed(conversationId, chunkIndex, `Context load failed: ${errorMsg}`);
 
-          // Return 500 to trigger retry (context may become available after previous chunk completes)
+          // Return 500 to trigger retry (in case it's a transient issue)
           res.status(500).send(`Chunk context not ready: ${errorMsg}`);
           return;
         }

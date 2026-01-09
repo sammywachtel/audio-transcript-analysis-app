@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added 20MB file size threshold for chunking (in addition to 30-minute duration threshold)
   - Prevents WhisperX from returning massive JSON responses that exceed parser buffer limits
   - High-quality short audio (e.g., 46MB / 15 minutes) now properly chunks before processing
+- **Chunk Cascade Failure** - Chunks no longer fail in cascade when predecessor is still processing
+  - Chunks waiting on a processing predecessor now return 500 without marking themselves as failed
+  - Prevents "Chunk N cannot proceed - previous chunk N-1 failed" cascade when chunks race ahead
+  - Cloud Tasks retries chunks cleanly without poisoning the chunk status chain
 
 ## [1.8.0-beta] - 2026-01-05
 
