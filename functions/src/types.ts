@@ -83,6 +83,9 @@ export interface Conversation {
   lastSyncedAt?: string;
   // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
   processingMode?: ProcessingMode;
+  // Speaker reconciliation metadata (parallel mode only)
+  reconciliationConfidence?: number;
+  reconciliationDetails?: ReconciliationDetails;
 }
 
 export enum ProcessingStep {
@@ -320,4 +323,45 @@ export interface ChunkArtifact {
   createdAt: string;
   /** Storage path to chunk audio file */
   storagePath: string;
+}
+
+// =============================================================================
+// Speaker Reconciliation Types (Parallel Mode)
+// =============================================================================
+
+/**
+ * Overall confidence score and per-cluster breakdown for speaker reconciliation.
+ * Used to assess the quality of speaker matching across chunks.
+ */
+export interface ReconciliationConfidence {
+  /** Overall confidence (0-1, minimum of cluster confidences) */
+  overall: number;
+  /** Per-cluster confidence scores */
+  clusters: Array<{
+    canonicalId: string;
+    confidence: number;
+  }>;
+}
+
+/**
+ * Detailed match evidence for speaker reconciliation.
+ * Provides transparency into how speakers were matched.
+ */
+export interface ReconciliationDetails {
+  /** Number of clusters (canonical speakers) created */
+  clusterCount: number;
+  /** Total number of original speakers across all chunks */
+  originalSpeakerCount: number;
+  /** Per-cluster match evidence */
+  clusters: Array<{
+    canonicalId: string;
+    originalIds: string[];
+    confidence: number;
+    displayName: string;
+    matchEvidence: {
+      nameMatches: number;
+      topicOverlap: number;
+      termOverlap: number;
+    };
+  }>;
 }
