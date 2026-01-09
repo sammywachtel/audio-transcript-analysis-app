@@ -199,10 +199,11 @@ export const processTranscription = onRequest(
           const errorMsg = contextError instanceof Error ? contextError.message : String(contextError);
 
           // Distinguish between "waiting" (retriable) vs "predecessor failed" (permanent)
-          const isWaitingOnProcessing = errorMsg.includes('still processing');
+          // Both "still processing" and "still pending" are retriable states
+          const isRetriable = errorMsg.includes('still processing') || errorMsg.includes('still pending');
 
-          if (isWaitingOnProcessing) {
-            // Previous chunk is still processing - this is retriable, NOT a failure
+          if (isRetriable) {
+            // Previous chunk hasn't completed yet - this is retriable, NOT a failure
             // Don't mark as failed, just return 500 to let Cloud Tasks retry
             console.log('[ProcessTranscription] Chunk waiting on predecessor:', {
               conversationId,
