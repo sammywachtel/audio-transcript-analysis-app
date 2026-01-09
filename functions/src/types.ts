@@ -5,6 +5,13 @@
  * TypeScript compilation issues. Keep in sync with root types.ts.
  */
 
+/**
+ * Processing mode for chunked audio uploads.
+ * - 'parallel': Chunks process independently (fast, speaker reconciliation at merge)
+ * - 'sequential': Chunks wait for predecessor context (legacy, consistent speaker IDs)
+ */
+export type ProcessingMode = 'parallel' | 'sequential';
+
 export interface Speaker {
   speakerId: string;
   displayName: string;
@@ -74,6 +81,8 @@ export interface Conversation {
   processingTimeline?: ProcessingTimeline[];
   syncStatus?: 'local_only' | 'synced' | 'pending_upload' | 'conflict';
   lastSyncedAt?: string;
+  // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
+  processingMode?: ProcessingMode;
 }
 
 export enum ProcessingStep {
@@ -231,6 +240,30 @@ export interface ChunkPipelineResult {
   segmentCount: number;
   /** Last timestamp processed in this chunk (ms) */
   lastTimestampMs: number;
+  /** Speaker signatures for parallel mode reconciliation (keyed by speakerId) */
+  chunkSpeakerSignatures?: SpeakerSignature[];
+}
+
+/**
+ * Speaker signature for parallel mode reconciliation.
+ * Captures fingerprint data for each speaker so downstream merge
+ * can correlate speakers across independently-processed chunks.
+ */
+export interface SpeakerSignature {
+  /** Speaker ID within this chunk (e.g., "SPEAKER_00") */
+  speakerId: string;
+  /** Chunk index where this speaker appeared */
+  chunkIndex: number;
+  /** Inferred display name (if speaker introduced themselves) */
+  inferredName?: string;
+  /** Topic IDs where this speaker spoke (subset for fingerprinting) */
+  topicSignatures: string[];
+  /** Term keys this speaker used (subset for fingerprinting) */
+  termSignatures: string[];
+  /** Number of segments this speaker contributed */
+  segmentCount: number;
+  /** Sample quote from this speaker (first ~100 chars) */
+  sampleQuote: string;
 }
 
 /**
@@ -275,6 +308,12 @@ export interface ChunkArtifact {
 
   /** Context emitted for the next chunk */
   emittedContext: ChunkContext;
+
+  /**
+   * Speaker signatures for parallel mode reconciliation.
+   * Present when processingMode is 'parallel'; used by merge to correlate speakers.
+   */
+  chunkSpeakerSignatures?: SpeakerSignature[];
 
   // Metadata
   /** When this chunk artifact was created */

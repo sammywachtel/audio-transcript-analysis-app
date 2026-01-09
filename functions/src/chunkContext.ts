@@ -62,6 +62,10 @@ export function sanitizeForFirestore<T>(obj: T): T {
 /**
  * Create an empty initial context for the first chunk.
  * This is the "seed" state before any processing.
+ *
+ * Used in two scenarios:
+ * - Sequential mode: Only for chunk 0 (subsequent chunks inherit context)
+ * - Parallel mode: Every chunk gets fresh initial context (no predecessor wait)
  */
 export function createInitialContext(): ChunkContext {
   return {
@@ -75,6 +79,9 @@ export function createInitialContext(): ChunkContext {
     lastProcessedMs: 0
   };
 }
+
+// Alias for clearer naming in parallel mode code paths
+export const createInitialChunkContext = createInitialContext;
 
 /**
  * Create initial chunk statuses for a set of chunks.

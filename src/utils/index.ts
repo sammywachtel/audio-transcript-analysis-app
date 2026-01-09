@@ -1,4 +1,4 @@
-import { Conversation } from '@/config/types';
+import { Conversation, ProcessingMode } from '@/config/types';
 
 export const formatTime = (ms: number): string => {
   const totalSeconds = Math.floor(ms / 1000);
@@ -12,11 +12,24 @@ export const cn = (...classes: (string | undefined | null | false)[]) => {
 };
 
 /**
+ * Options for creating a placeholder conversation.
+ */
+export interface CreateConversationOptions {
+  /** Processing mode - 'parallel' (fast) or 'sequential' (legacy). Defaults to 'parallel'. */
+  processingMode?: ProcessingMode;
+}
+
+/**
  * Creates a minimal placeholder conversation for upload.
  * Only contains real data (filename, timestamps) - no fake metadata.
  * Cloud Function will populate all actual content after processing.
  */
-export const createMockConversation = (file: File): Conversation => {
+export const createMockConversation = (
+  file: File,
+  options: CreateConversationOptions = {}
+): Conversation => {
+  const { processingMode = 'parallel' } = options;
+
   return {
     conversationId: `c_${Date.now()}`,
     userId: 'local', // Placeholder - will be set by ConversationContext
@@ -31,6 +44,7 @@ export const createMockConversation = (file: File): Conversation => {
     topics: [], // Empty - no fake topics
     people: [],
     segments: [], // Empty - no fake segments
-    alignmentStatus: 'pending' // Waiting for server-side alignment
+    alignmentStatus: 'pending', // Waiting for server-side alignment
+    processingMode // User-selected processing mode
   };
 };

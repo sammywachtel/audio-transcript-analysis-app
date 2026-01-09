@@ -1,9 +1,9 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Conversation } from '@/config/types';
+import { Conversation, ProcessingMode } from '@/config/types';
 import { formatTime, cn, createMockConversation } from '@/utils';
 import { useConversations } from '../contexts/ConversationContext';
 import { useAuth } from '../contexts/AuthContext';
-import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, Settings, BarChart3, Search } from 'lucide-react';
+import { FileAudio, Calendar, Clock, ChevronRight, UploadCloud, X, Loader2, File as FileIcon, AlertCircle, Trash2, Cloud, CloudOff, RefreshCw, Settings, BarChart3, Search, Zap, Clock4 } from 'lucide-react';
 import { Button } from '../components/Button';
 import { UserMenu } from '../components/auth/UserMenu';
 import { ProcessingProgressRow } from '../components/library/ProcessingProgressRow';
@@ -329,6 +329,7 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
   const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'saving' | 'done' | 'error'>('idle');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [processingMode, setProcessingMode] = useState<ProcessingMode>('parallel');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -369,8 +370,8 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
     setErrorMessage(null);
 
     try {
-      // Create placeholder conversation - Cloud Function will process and update
-      const conversation = createMockConversation(selectedFile);
+      // Create placeholder conversation with user-selected processing mode
+      const conversation = createMockConversation(selectedFile, { processingMode });
 
       // Upload audio to Firebase Storage + save metadata to Firestore
       // This triggers the Cloud Function which will process with Gemini
@@ -467,6 +468,50 @@ const UploadModal: React.FC<{ onClose: () => void; onUpload: (conv: Conversation
                   <p className="text-slate-500 text-sm mt-1">Processing will complete shortly</p>
                 </>
               )}
+            </div>
+          )}
+
+          {/* Processing Mode Toggle - only show when file is selected and in idle/error state */}
+          {selectedFile && (uploadState === 'idle' || uploadState === 'error') && (
+            <div className="mt-4 animate-in fade-in slide-in-from-bottom-1">
+              <label className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2 block">
+                Processing Mode
+              </label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setProcessingMode('parallel')}
+                  className={cn(
+                    "flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border-2 transition-all duration-200",
+                    processingMode === 'parallel'
+                      ? "border-blue-500 bg-blue-50 text-blue-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                  )}
+                >
+                  <Zap size={16} className={cn(processingMode === 'parallel' && "text-blue-500")} />
+                  <span className="font-medium text-sm">Fast</span>
+                  <span className="text-xs opacity-60">(Parallel)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProcessingMode('sequential')}
+                  className={cn(
+                    "flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border-2 transition-all duration-200",
+                    processingMode === 'sequential'
+                      ? "border-amber-500 bg-amber-50 text-amber-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                  )}
+                >
+                  <Clock4 size={16} className={cn(processingMode === 'sequential' && "text-amber-500")} />
+                  <span className="font-medium text-sm">Legacy</span>
+                  <span className="text-xs opacity-60">(Sequential)</span>
+                </button>
+              </div>
+              <p className="text-xs text-slate-400 mt-2 text-center">
+                {processingMode === 'parallel'
+                  ? "Chunks process simultaneously. Faster for long files."
+                  : "Chunks wait for each other. More consistent speaker tracking."}
+              </p>
             </div>
           )}
 

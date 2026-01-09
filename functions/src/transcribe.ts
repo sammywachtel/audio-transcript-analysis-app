@@ -38,7 +38,15 @@ import { validateChunkSequence } from './chunkBounds';
 import {
   createInitialChunkStatuses
 } from './chunkContext';
-import { ChunkingMetadata, ChunkContext, ChunkPipelineResult, SpeakerMapping, ChunkArtifact } from './types';
+import {
+  ChunkingMetadata,
+  ChunkContext,
+  ChunkPipelineResult,
+  SpeakerMapping,
+  ChunkArtifact,
+  SpeakerSignature,
+  ProcessingMode
+} from './types';
 
 // Define secrets (set via: firebase functions:secrets:set <SECRET_NAME>)
 const replicateApiToken = defineSecret('REPLICATE_API_TOKEN');
@@ -139,6 +147,102 @@ async function retryWithBackoff<T>(
     }
   }
   throw new Error(`${operationName} failed after ${maxRetries} retries`);
+}
+
+// =============================================================================
+// Speaker Signature Builder
+// =============================================================================
+
+/**
+ * Build speaker signatures from processed data for parallel mode reconciliation.
+ *
+ * Each signature captures fingerprint data that helps the merge function
+ * correlate speakers across independently-processed chunks:
+ * - topicSignatures: Topics where this speaker spoke (vocabulary/subject correlation)
+ * - termSignatures: Specific terms used (vocabulary fingerprint)
+ * - segmentCount: How much this speaker talked (relative activity)
+ * - sampleQuote: First substantial utterance (manual verification aid)
+ */
+function buildChunkSpeakerSignatures(params: {
+  chunkIndex: number;
+  segments: Segment[];
+  speakers: Record<string, Speaker>;
+  topics: Topic[];
+  terms: Record<string, Term>;
+  termOccurrences: TermOccurrence[];
+}): SpeakerSignature[] {
+  const { chunkIndex, segments, speakers, topics, terms, termOccurrences } = params;
+
+  // Group segments by speaker
+  const segmentsBySpeaker = new Map<string, Segment[]>();
+  for (const seg of segments) {
+    const existing = segmentsBySpeaker.get(seg.speakerId) || [];
+    existing.push(seg);
+    segmentsBySpeaker.set(seg.speakerId, existing);
+  }
+
+  // Build term occurrences by segment for quick lookup
+  const termsBySegment = new Map<string, Set<string>>();
+  for (const occ of termOccurrences) {
+    const existing = termsBySegment.get(occ.segmentId) || new Set<string>();
+    // Store the term key, not the ID, for vocabulary fingerprinting
+    const term = terms[occ.termId];
+    if (term) {
+      existing.add(term.key);
+    }
+    termsBySegment.set(occ.segmentId, existing);
+  }
+
+  // Build topic coverage by segment index
+  // Topics span ranges of segments, so we need to check if each segment falls in a topic range
+  const getTopicsForSegment = (segmentIndex: number): string[] => {
+    return topics
+      .filter(t => segmentIndex >= t.startIndex && segmentIndex <= t.endIndex)
+      .map(t => t.topicId);
+  };
+
+  const signatures: SpeakerSignature[] = [];
+
+  for (const [speakerId, speakerSegments] of segmentsBySpeaker) {
+    const speaker = speakers[speakerId];
+    if (!speaker) continue;
+
+    // Collect unique topic and term signatures
+    const topicSet = new Set<string>();
+    const termSet = new Set<string>();
+
+    for (const seg of speakerSegments) {
+      // Add topics this segment belongs to
+      for (const topicId of getTopicsForSegment(seg.index)) {
+        topicSet.add(topicId);
+      }
+      // Add terms used in this segment
+      const segTerms = termsBySegment.get(seg.segmentId);
+      if (segTerms) {
+        for (const termKey of segTerms) {
+          termSet.add(termKey);
+        }
+      }
+    }
+
+    // Get a sample quote (first segment with substantial text, max 100 chars)
+    const sampleSegment = speakerSegments.find(s => s.text.length >= 20) || speakerSegments[0];
+    const sampleQuote = sampleSegment
+      ? sampleSegment.text.slice(0, 100) + (sampleSegment.text.length > 100 ? '...' : '')
+      : '';
+
+    signatures.push({
+      speakerId,
+      chunkIndex,
+      inferredName: speaker.displayName !== speakerId ? speaker.displayName : undefined,
+      topicSignatures: Array.from(topicSet),
+      termSignatures: Array.from(termSet),
+      segmentCount: speakerSegments.length,
+      sampleQuote
+    });
+  }
+
+  return signatures;
 }
 
 // Gemini analysis-only response (analyzes WhisperX transcript)
@@ -1290,6 +1394,17 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       : null;
     const lastTimestampMs = lastSegment?.endMs ?? processedData.durationMs;
 
+    // Build speaker signatures for parallel mode reconciliation
+    // These fingerprints help the merge function correlate speakers across chunks
+    const chunkSpeakerSignatures = buildChunkSpeakerSignatures({
+      chunkIndex: chunkMetadata?.chunkIndex ?? 0,
+      segments: processedData.segments,
+      speakers: processedData.speakers,
+      topics: processedData.topics,
+      terms: processedData.terms,
+      termOccurrences: processedData.termOccurrences
+    });
+
     const pipelineResult: ChunkPipelineResult = {
       speakerMappings,
       summary: summaryText,
@@ -1297,7 +1412,8 @@ export async function executeTranscriptionPipeline(params: TranscriptionPipeline
       topicIds: processedData.topics.map(t => t.topicId),
       personIds: processedData.people.map(p => p.personId),
       segmentCount: processedData.segments.length,
-      lastTimestampMs
+      lastTimestampMs,
+      chunkSpeakerSignatures
     };
 
     if (chunkContext) {
@@ -1481,6 +1597,25 @@ export const transcribeAudio = onObjectFinalized(
     const conversationId = fileName.split('.')[0];
     const fileExtension = fileName.split('.').pop();
 
+    // Read processingMode from Storage custom metadata
+    // If metadata is missing, check Firestore for an existing value (legacy uploads)
+    // Only default to 'parallel' if neither source has a value
+    const customMetadata = event.data.metadata as Record<string, string> | undefined;
+    let processingMode: ProcessingMode = (customMetadata?.processingMode === 'sequential')
+      ? 'sequential'
+      : 'parallel';
+
+    // Honor stored legacy mode when Storage metadata is absent
+    // This handles uploads that started before we added processingMode to Storage metadata
+    if (!customMetadata?.processingMode) {
+      const existingDoc = await db.collection('conversations').doc(conversationId).get();
+      const storedMode = existingDoc.data()?.processingMode;
+      if (storedMode === 'sequential') {
+        processingMode = 'sequential';
+        console.log('[Transcribe] Using stored sequential mode from Firestore (no Storage metadata)');
+      }
+    }
+
     console.log('[Transcribe] Audio file uploaded - enqueuing for processing:', {
       filePath,
       userId,
@@ -1488,7 +1623,8 @@ export const transcribeAudio = onObjectFinalized(
       contentType,
       fileExtension,
       sizeBytes: event.data.size,
-      sizeMB: (event.data.size / (1024 * 1024)).toFixed(2)
+      sizeMB: (event.data.size / (1024 * 1024)).toFixed(2),
+      processingMode
     });
 
     // Initialize progress manager for UI feedback
@@ -1500,10 +1636,12 @@ export const transcribeAudio = onObjectFinalized(
       // Update status to queued (processing will start when Cloud Tasks picks it up)
       // Using set() with merge to handle race condition where storage trigger fires
       // before frontend has created the Firestore document
+      // Note: processingMode is read from Storage metadata for consistency
       await db.collection('conversations').doc(conversationId).set({
         conversationId,
         userId,
         status: 'queued',
+        processingMode, // 'parallel' or 'sequential' - controls chunk execution strategy
         queuedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
       }, { merge: true });
@@ -1597,7 +1735,8 @@ export const transcribeAudio = onObjectFinalized(
           const payload = {
             conversationId,
             userId,
-            filePath
+            filePath,
+            processingMode
           };
 
           const task = {
@@ -1728,7 +1867,8 @@ export const transcribeAudio = onObjectFinalized(
 
           // Create one Cloud Task per chunk
           // Stagger scheduling to avoid thundering herd
-          // Note: First chunk uses initial context, subsequent chunks load from Firestore
+          // Note: For sequential mode, chunks wait for predecessors
+          //       For parallel mode, chunks run independently
           const taskPromises = uploadedChunks.map(async (chunk, index) => {
             const payload = {
               conversationId,
@@ -1737,6 +1877,7 @@ export const transcribeAudio = onObjectFinalized(
               chunkIndex: chunk.chunkIndex,
               totalChunks: chunk.totalChunks,
               chunkMetadata: chunk,
+              processingMode, // Controls whether chunk waits for predecessor context
               // Include timing metadata for offset calculations
               chunkStartMs: chunk.startMs,
               chunkEndMs: chunk.endMs,

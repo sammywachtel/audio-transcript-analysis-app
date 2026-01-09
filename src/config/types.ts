@@ -45,6 +45,13 @@ export interface Segment {
   text: string;
 }
 
+/**
+ * Processing mode for chunked audio uploads.
+ * - 'parallel': Chunks process independently (fast, speaker reconciliation at merge)
+ * - 'sequential': Chunks wait for predecessor context (legacy, consistent speaker IDs)
+ */
+export type ProcessingMode = 'parallel' | 'sequential';
+
 export interface Conversation {
   conversationId: string;
   userId: string; // Owner's Firebase UID - isolates data per user
@@ -68,6 +75,8 @@ export interface Conversation {
   // - 'fallback': WhisperX failed, using Gemini timestamps (may be inaccurate)
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string; // Error message if alignment failed (for fallback status)
+  // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
+  processingMode?: ProcessingMode;
 
   // Progressive processing status (all optional for backward compatibility)
   processingProgress?: ProcessingProgress;
