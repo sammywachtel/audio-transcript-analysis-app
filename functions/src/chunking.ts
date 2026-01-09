@@ -100,6 +100,8 @@ export const CHUNK_CONFIG = {
   SILENCE_MIN_DURATION: 0.5,
   /** Files under this duration don't need chunking (30 minutes) */
   CHUNKING_THRESHOLD_SECONDS: 1800,
+  /** Files larger than this size need chunking regardless of duration (20MB) */
+  CHUNKING_THRESHOLD_BYTES: 20 * 1024 * 1024,
 };
 
 // =============================================================================
@@ -536,16 +538,30 @@ export async function chunkAudioFile(
   const durationSeconds = await getAudioDuration(audioFilePath);
   const durationMs = Math.floor(durationSeconds * 1000);
 
-  console.log('[Chunking] Audio duration:', {
+  // Get file size
+  const fileSizeBytes = fs.statSync(audioFilePath).size;
+  const fileSizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(2);
+
+  // Determine if chunking is needed based on duration OR file size
+  const exceedsDurationThreshold = durationSeconds > CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS;
+  const exceedsSizeThreshold = fileSizeBytes > CHUNK_CONFIG.CHUNKING_THRESHOLD_BYTES;
+  const needsChunking = exceedsDurationThreshold || exceedsSizeThreshold;
+
+  console.log('[Chunking] Audio analysis:', {
     durationSeconds,
     durationMs,
-    chunking_threshold: CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS,
-    needsChunking: durationSeconds > CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS,
+    fileSizeBytes,
+    fileSizeMB,
+    duration_threshold: CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS,
+    size_threshold_mb: (CHUNK_CONFIG.CHUNKING_THRESHOLD_BYTES / (1024 * 1024)).toFixed(2),
+    exceedsDurationThreshold,
+    exceedsSizeThreshold,
+    needsChunking,
   });
 
-  // If audio is short enough, no chunking needed
-  if (durationSeconds <= CHUNK_CONFIG.CHUNKING_THRESHOLD_SECONDS) {
-    console.log('[Chunking] File is short enough, no chunking needed');
+  // If audio is short enough AND small enough, no chunking needed
+  if (!needsChunking) {
+    console.log('[Chunking] File is short and small enough, no chunking needed');
     return {
       result: {
         chunked: false,
@@ -556,6 +572,10 @@ export async function chunkAudioFile(
       localChunkPaths: [],
     };
   }
+
+  console.log('[Chunking] File needs chunking:', {
+    reason: exceedsDurationThreshold ? 'duration' : 'file size',
+  });
 
   // Detect silence gaps
   const silenceGaps = await detectSilenceGaps(audioFilePath);

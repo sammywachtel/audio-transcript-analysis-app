@@ -184,11 +184,14 @@ export async function markChunkProcessing(
     // Increment retry count if this was previously failed or processing
     const isRetry = currentStatus.status === 'failed' || currentStatus.status === 'processing';
 
+    // Build new status object without the error field (Firestore rejects undefined values)
+    // Destructure out error from currentStatus so it's not spread into the new object
+    const { error: _previousError, ...statusWithoutError } = currentStatus;
+
     statuses[statusIndex] = {
-      ...currentStatus,
+      ...statusWithoutError,
       status: 'processing',
       startedAt: new Date().toISOString(),
-      error: undefined, // Clear previous error
       retryCount: isRetry ? (currentStatus.retryCount || 0) + 1 : currentStatus.retryCount || 0
     };
 
