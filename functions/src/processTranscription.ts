@@ -32,7 +32,8 @@ import {
   markChunkProcessing,
   markChunkComplete,
   markChunkFailed,
-  buildNextContext
+  buildNextContext,
+  sanitizeForFirestore
 } from './chunkContext';
 import { ChunkContext } from './types';
 import { ChunkMetadata } from './chunking';
@@ -274,16 +275,20 @@ export const processTranscription = onRequest(
           }
         );
 
+        // Sanitize the context - Firestore doesn't allow undefined values
+        // (e.g., voiceSignature in speaker mappings is optional and may be undefined)
+        const sanitizedContext = sanitizeForFirestore(nextContext);
+
         // Update the chunk artifact with the actual emitted context
         await db
           .collection('conversations')
           .doc(conversationId)
           .collection('chunks')
           .doc(String(chunkIndex))
-          .update({ emittedContext: nextContext });
+          .update({ emittedContext: sanitizedContext });
 
         // Mark chunk complete and check if merge should be triggered
-        const result = await markChunkComplete(conversationId, chunkIndex, nextContext);
+        const result = await markChunkComplete(conversationId, chunkIndex, sanitizedContext);
 
         console.log('[ProcessTranscription] ✅ Chunk completed successfully:', {
           conversationId,

@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Chunks waiting on a processing predecessor now return 500 without marking themselves as failed
   - Prevents "Chunk N cannot proceed - previous chunk N-1 failed" cascade when chunks race ahead
   - Cloud Tasks retries chunks cleanly without poisoning the chunk status chain
+- **Chunk Context Firestore Write Error** - Fixed undefined value error when saving chunk emitted context
+  - Added `sanitizeForFirestore()` utility that recursively strips undefined values from objects
+  - Fixes "Cannot use undefined as a Firestore value" error in `emittedContext.speakerMap.voiceSignature`
+  - Optional fields like `voiceSignature` and `displayName` in speaker mappings now properly omitted when undefined
 
 ## [1.8.0-beta] - 2026-01-05
 

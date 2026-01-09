@@ -25,6 +25,37 @@ import {
 const MAX_SUMMARY_LENGTH = 512;
 
 // =============================================================================
+// Firestore Utilities
+// =============================================================================
+
+/**
+ * Recursively strip undefined values from an object.
+ * Firestore doesn't allow undefined - it'll throw "Cannot use undefined as a Firestore value".
+ * This sanitizer removes undefined fields entirely (vs setting them to null).
+ */
+export function sanitizeForFirestore<T>(obj: T): T {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeForFirestore(item)) as T;
+  }
+
+  if (typeof obj === 'object') {
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value !== undefined) {
+        sanitized[key] = sanitizeForFirestore(value);
+      }
+    }
+    return sanitized as T;
+  }
+
+  return obj;
+}
+
+// =============================================================================
 // Context Creation
 // =============================================================================
 
