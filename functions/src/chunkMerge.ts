@@ -21,10 +21,13 @@ import {
   Term,
   TermOccurrence,
   Topic,
-  Person
+  Person,
+  SpeakerSignature,
+  ReconciliationDetails
 } from './types';
 import { getPreferredChunkForTimestamp, chunkToOriginalTimestamp } from './chunkBounds';
 import { ChunkMetadata } from './chunking';
+import { reconcileSpeakers, ReconciliationLowConfidenceError } from './speakerReconciliation';
 
 /**
  * Merge all chunk artifacts for a conversation into the final document.
@@ -114,7 +117,74 @@ export async function mergeChunks(conversationId: string): Promise<void> {
                 artifact.chunkBounds.overlapBeforeMs + artifact.chunkBounds.overlapAfterMs
   }));
 
-  // Step 3: Deduplicate segments using preferred chunk logic
+  // Step 3: Run speaker reconciliation (parallel mode only)
+  let reconciliationConfidence: number | undefined;
+  let reconciliationDetails: ReconciliationDetails | undefined;
+  const speakerIdRemapping = new Map<string, string>(); // originalId → canonicalId
+
+  const processingMode = conversationData.processingMode || 'parallel';
+
+  if (processingMode === 'parallel') {
+    console.log('[ChunkMerge] Running speaker reconciliation (parallel mode)...');
+
+    // Collect all speaker signatures from chunks
+    const allSignatures: SpeakerSignature[] = [];
+    for (const artifact of chunkArtifacts) {
+      if (artifact.chunkSpeakerSignatures) {
+        allSignatures.push(...artifact.chunkSpeakerSignatures);
+      }
+    }
+
+    console.log('[ChunkMerge] Collected speaker signatures:', {
+      totalSignatures: allSignatures.length,
+      chunks: new Set(allSignatures.map(s => s.chunkIndex)).size
+    });
+
+    try {
+      const reconciliationResult = reconcileSpeakers(allSignatures);
+
+      // Store reconciliation metadata
+      reconciliationConfidence = reconciliationResult.overallConfidence;
+      reconciliationDetails = {
+        clusterCount: reconciliationResult.clusterDetails.length,
+        originalSpeakerCount: allSignatures.length,
+        clusters: reconciliationResult.clusterDetails.map(c => ({
+          canonicalId: c.canonicalId,
+          originalIds: c.originalIds,
+          confidence: c.confidence,
+          displayName: c.displayName,
+          matchEvidence: c.matchEvidence
+        }))
+      };
+
+      // Build remapping table
+      for (const [originalId, canonicalId] of reconciliationResult.speakerIdMap) {
+        speakerIdRemapping.set(originalId, canonicalId);
+      }
+
+      console.log('[ChunkMerge] Speaker reconciliation complete:', {
+        overallConfidence: reconciliationConfidence,
+        totalClusters: reconciliationDetails.clusterCount,
+        totalOriginalSpeakers: reconciliationDetails.originalSpeakerCount
+      });
+
+    } catch (error) {
+      if (error instanceof ReconciliationLowConfidenceError) {
+        // Low confidence reconciliation - throw error to fail merge
+        console.error('[ChunkMerge] ❌ Speaker reconciliation confidence too low:', {
+          confidence: error.overallConfidence,
+          clusterCount: error.clusterDetails.length
+        });
+        throw error;
+      }
+      // Re-throw other errors
+      throw error;
+    }
+  } else {
+    console.log('[ChunkMerge] Skipping speaker reconciliation (sequential mode)');
+  }
+
+  // Step 4: Deduplicate segments using preferred chunk logic
   //
   // IMPORTANT: Segment timestamps from Gemini are chunk-local (start at 0 for each chunk).
   // We must convert them to the original audio timeline before checking which chunk "owns"
@@ -139,8 +209,19 @@ export async function mergeChunks(conversationId: string): Promise<void> {
       if (preferredChunk === artifact.chunkIndex) {
         // This chunk "owns" this segment - include it with normalized timestamps
         if (!seenSegmentIds.has(segment.segmentId)) {
+          // Remap speaker ID if reconciliation was performed
+          let speakerId = segment.speakerId;
+          if (processingMode === 'parallel' && speakerIdRemapping.size > 0) {
+            const originalId = `${segment.speakerId}_chunk${artifact.chunkIndex}`;
+            const canonicalId = speakerIdRemapping.get(originalId);
+            if (canonicalId) {
+              speakerId = canonicalId;
+            }
+          }
+
           mergedSegments.push({
             ...segment,
+            speakerId,
             startMs: originalStartMs,
             endMs: originalEndMs
           });
@@ -165,23 +246,35 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     duplicatesRemoved: chunkArtifacts.reduce((sum, c) => sum + c.segments.length, 0) - mergedSegments.length
   });
 
-  // Step 4: Merge speakers (simple union - speaker IDs should be consistent across chunks)
+  // Step 5: Merge speakers
   console.log('[ChunkMerge] Merging speakers...');
   const mergedSpeakers: Record<string, Speaker> = {};
 
-  for (const artifact of chunkArtifacts) {
-    for (const [speakerId, speaker] of Object.entries(artifact.speakers)) {
-      if (!mergedSpeakers[speakerId]) {
-        mergedSpeakers[speakerId] = speaker;
-      }
-      // If speaker already exists, prefer the one with a display name
-      else if (speaker.displayName && !mergedSpeakers[speakerId].displayName) {
-        mergedSpeakers[speakerId] = speaker;
+  if (processingMode === 'parallel' && reconciliationDetails) {
+    // Use reconciliation results to build canonical speaker map
+    for (const cluster of reconciliationDetails.clusters) {
+      mergedSpeakers[cluster.canonicalId] = {
+        speakerId: cluster.canonicalId,
+        displayName: cluster.displayName,
+        colorIndex: Object.keys(mergedSpeakers).length % 10 // Assign color index
+      };
+    }
+  } else {
+    // Sequential mode: simple union (speaker IDs should be consistent)
+    for (const artifact of chunkArtifacts) {
+      for (const [speakerId, speaker] of Object.entries(artifact.speakers)) {
+        if (!mergedSpeakers[speakerId]) {
+          mergedSpeakers[speakerId] = speaker;
+        }
+        // If speaker already exists, prefer the one with a display name
+        else if (speaker.displayName && !mergedSpeakers[speakerId].displayName) {
+          mergedSpeakers[speakerId] = speaker;
+        }
       }
     }
   }
 
-  // Step 5: Merge terms (deduplicate by termId)
+  // Step 6: Merge terms (deduplicate by termId)
   console.log('[ChunkMerge] Merging terms...');
   const mergedTerms: Record<string, Term> = {};
   const mergedTermOccurrences: TermOccurrence[] = [];
@@ -205,7 +298,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     }
   }
 
-  // Step 6: Merge topics (deduplicate by topicId, adjust indices)
+  // Step 7: Merge topics (deduplicate by topicId, adjust indices)
   console.log('[ChunkMerge] Merging topics...');
   const mergedTopics: Topic[] = [];
   const seenTopicIds = new Set<string>();
@@ -222,7 +315,7 @@ export async function mergeChunks(conversationId: string): Promise<void> {
   // Sort topics by start index
   mergedTopics.sort((a, b) => a.startIndex - b.startIndex);
 
-  // Step 7: Merge people (deduplicate by personId)
+  // Step 8: Merge people (deduplicate by personId)
   console.log('[ChunkMerge] Merging people...');
   const mergedPeople: Person[] = [];
   const seenPersonIds = new Set<string>();
@@ -236,13 +329,13 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     }
   }
 
-  // Step 8: Calculate total duration from last segment
+  // Step 9: Calculate total duration from last segment
   const lastSegment = mergedSegments[mergedSegments.length - 1];
   const durationMs = lastSegment ? lastSegment.endMs : chunkingMeta.originalDurationMs;
 
-  // Step 9: Write final merged data to conversation document
+  // Step 10: Write final merged data to conversation document
   console.log('[ChunkMerge] Writing final merged data...');
-  await conversationRef.update({
+  const updateData: any = {
     segments: mergedSegments,
     speakers: mergedSpeakers,
     terms: mergedTerms,
@@ -254,7 +347,15 @@ export async function mergeChunks(conversationId: string): Promise<void> {
     'chunkingMetadata.mergedAt': new Date().toISOString(),
     alignmentStatus: 'aligned', // Chunks use WhisperX alignment
     updatedAt: FieldValue.serverTimestamp()
-  });
+  };
+
+  // Add reconciliation metadata if parallel mode
+  if (processingMode === 'parallel' && reconciliationConfidence !== undefined) {
+    updateData.reconciliationConfidence = reconciliationConfidence;
+    updateData.reconciliationDetails = reconciliationDetails;
+  }
+
+  await conversationRef.update(updateData);
 
   console.log('[ChunkMerge] ✅ Merge complete:', {
     conversationId,

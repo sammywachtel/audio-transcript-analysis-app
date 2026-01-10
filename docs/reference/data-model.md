@@ -40,6 +40,10 @@ interface ConversationDoc {
   // Processing Mode (Chunked Uploads)
   processingMode?: 'parallel' | 'sequential';  // Controls chunk execution strategy
 
+  // Speaker Reconciliation (Parallel Mode Only)
+  reconciliationConfidence?: number;           // Overall confidence (0-1) of speaker matching
+  reconciliationDetails?: ReconciliationDetails; // Detailed match evidence per cluster
+
   // Abort Control
   abortRequested?: boolean;     // User requested processing stop
 
@@ -472,6 +476,8 @@ interface Conversation {
   alignmentStatus?: 'pending' | 'aligned' | 'fallback';
   alignmentError?: string;    // Reason for fallback
   processingMode?: 'parallel' | 'sequential';  // Chunk execution strategy
+  reconciliationConfidence?: number;  // Speaker matching confidence (parallel mode)
+  reconciliationDetails?: ReconciliationDetails;  // Match evidence (parallel mode)
   queuedAt?: string;          // ISO timestamp when Cloud Task enqueued
   processingStartedAt?: string; // ISO timestamp when processing began
   speakers: Record<string, Speaker>;
@@ -486,6 +492,10 @@ interface Conversation {
 **Processing Mode Values:**
 - `'parallel'` (default): Chunks process independently and concurrently. Faster for long files, but requires speaker reconciliation at merge time. Best for most use cases.
 - `'sequential'`: Chunks wait for predecessor to complete before starting. Slower but maintains consistent speaker IDs across chunks without reconciliation.
+
+**Speaker Reconciliation Metadata (parallel mode only):**
+- `reconciliationConfidence`: Overall confidence score (0-1) for speaker matching. Minimum of all cluster confidences.
+- `reconciliationDetails`: Detailed evidence for how speakers were matched (see `ReconciliationDetails` below).
 
 ### Speaker
 
@@ -647,6 +657,32 @@ interface ProcessingTimeline {
   durationMs?: number;        // Duration in milliseconds (computed when completedAt is set)
 }
 ```
+
+### ReconciliationDetails
+
+Speaker reconciliation metadata for parallel chunk processing:
+
+```typescript
+interface ReconciliationDetails {
+  clusterCount: number;        // Number of canonical speakers created
+  originalSpeakerCount: number; // Total speakers across all chunks
+  clusters: Array<{
+    canonicalId: string;       // Canonical speaker ID (e.g., "speaker_canonical_0")
+    originalIds: string[];     // Original speaker IDs merged into this cluster
+    confidence: number;        // Cluster confidence (0-1)
+    displayName: string;       // Best display name from cluster
+    matchEvidence: {
+      nameMatches: number;     // Number of name-based matches
+      topicOverlap: number;    // Average topic overlap score
+      termOverlap: number;     // Average term overlap score
+    };
+  }>;
+}
+```
+
+**Purpose**: Provides transparency into how speakers were matched across chunks in parallel mode. Includes confidence scores and match evidence for debugging and quality assessment.
+
+**When present**: Only for conversations processed in parallel mode with multiple chunks. Sequential mode doesn't need reconciliation since speaker IDs are consistent across chunks.
 
 ## Firebase Storage Structure
 

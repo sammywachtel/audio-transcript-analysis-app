@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Speaker Reconciliation for Parallel Processing** - Automatic speaker identity matching across independently-processed chunks
+  - Uses multi-signal similarity algorithm: name matching (50%), topic overlap (25%), term overlap (25%)
+  - Greedy clustering identifies same speaker appearing in different chunks
+  - Generates canonical speaker IDs (`speaker_canonical_0`, etc.) for unified transcript
+  - Stores `reconciliationConfidence` and `reconciliationDetails` metadata for transparency
+  - Throws `ReconciliationLowConfidenceError` when confidence below 0.6 threshold
+  - Seamlessly integrated into chunk merge pipeline before segment deduplication
 - **Parallel Chunk Processing Mode** - New Fast/Legacy toggle for large file uploads
   - Fast mode (default): Chunks process independently in parallel for faster results
   - Legacy mode: Chunks process sequentially, maintaining speaker ID continuity across chunks

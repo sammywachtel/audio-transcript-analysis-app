@@ -21,7 +21,9 @@ Audio Upload → Chunking → Chunk Processing → Chunk Merge → Complete
 ```
 conversations/{id}/chunks/*  → mergeChunks() → conversations/{id}
          ↓                           ↓                    ↓
-   ChunkArtifacts           Deduplicate & Merge     Final Conversation
+   ChunkArtifacts           Speaker Reconciliation  Final Conversation
+                                     ↓
+                            Deduplicate & Merge
 ```
 
 ### Components
@@ -55,6 +57,50 @@ processing → chunking → merging → complete
 - **chunking**: Chunks created, tasks enqueued, processing in progress
 - **merging**: All chunks complete, merge task running
 - **complete**: Merge complete, final conversation ready
+
+## Speaker Reconciliation (Parallel Mode)
+
+### Problem
+
+In **parallel mode**, chunks process independently without shared context. This means:
+
+- Each chunk assigns speaker IDs independently (e.g., `SPEAKER_00`, `SPEAKER_01`)
+- The **same speaker** may get **different IDs** in different chunks
+- Without reconciliation, the merged transcript would show multiple speakers for the same person
+
+**Example**:
+```
+Chunk 0: Alice speaks → assigned "SPEAKER_00"
+Chunk 1: Alice speaks → assigned "SPEAKER_00" (different person!)
+Chunk 2: Alice speaks → assigned "SPEAKER_01"
+```
+
+After merge without reconciliation: 3 different speakers (WRONG!)
+
+### Solution: Speaker Signatures + Clustering
+
+The reconciliation algorithm matches speakers across chunks using three signals:
+
+1. **Name matching (50% weight)**: If speakers introduced themselves ("Hi, I'm Alice")
+2. **Topic overlap (25% weight)**: Jaccard similarity of topics discussed
+3. **Term overlap (25% weight)**: Jaccard similarity of technical terms used
+
+**Algorithm**:
+1. Build speaker signatures during chunk processing (name, topics, terms, sample quote)
+2. Compute similarity matrix between all speaker pairs (cross-chunk only)
+3. Greedy clustering: merge pairs with similarity > 0.7
+4. Generate canonical IDs (`speaker_canonical_0`, `speaker_canonical_1`, ...)
+5. Remap segment `speakerId` fields to canonical IDs
+
+**Confidence Threshold**:
+- If overall confidence < 0.6, throw `ReconciliationLowConfidenceError`
+- This prevents merging speakers when the match is too uncertain
+
+**Metadata Stored**:
+- `reconciliationConfidence`: Overall confidence score (0-1)
+- `reconciliationDetails`: Per-cluster match evidence for debugging
+
+**Sequential Mode**: No reconciliation needed - speaker IDs are consistent via context propagation.
 
 ## Deduplication Strategy
 
@@ -107,7 +153,21 @@ Merged result:
 
 ### Speakers
 
-Simple union - speaker IDs should be consistent across chunks (context propagation ensures this):
+**Parallel Mode**: Use reconciliation results to build canonical speaker map:
+
+```typescript
+if (processingMode === 'parallel' && reconciliationDetails) {
+  for (const cluster of reconciliationDetails.clusters) {
+    mergedSpeakers[cluster.canonicalId] = {
+      speakerId: cluster.canonicalId,
+      displayName: cluster.displayName,
+      colorIndex: assignedIndex
+    };
+  }
+}
+```
+
+**Sequential Mode**: Simple union - speaker IDs should be consistent across chunks (context propagation ensures this):
 
 ```typescript
 for (const [speakerId, speaker] of Object.entries(artifact.speakers)) {
@@ -238,23 +298,36 @@ Merge is cheaper than chunk processing:
 - Pure data transformation
 - Fast execution (<1s typically)
 
+## Reconciliation Quality Indicators
+
+The reconciliation system provides several quality indicators:
+
+- **Overall Confidence** (0-1): Minimum of all cluster confidences. Values above 0.7 indicate high confidence matches.
+- **Cluster Confidence**: Per-speaker confidence score based on match evidence.
+- **Match Evidence**: Breakdown of name matches, topic overlap, and term overlap.
+
+**When to Review**:
+- Overall confidence < 0.7: Review speaker assignments manually
+- Cluster count >> expected speakers: May indicate false negatives (speakers not merged)
+- Cluster count << expected speakers: May indicate false positives (different speakers merged)
+
 ## Future Improvements
 
-### 1. Parallel Segment Processing
+### 1. Voice Embeddings
 
-Current implementation processes segments sequentially. Could parallelize with worker threads for very large merges.
+Add voice biometric signatures to speaker reconciliation for more robust matching. Would complement name/content signals with acoustic fingerprints.
 
-### 2. Streaming Merge
+### 2. Manual Override UI
 
-For extremely large files, stream chunk artifacts instead of loading all into memory.
+Allow users to manually merge or split speakers if reconciliation makes mistakes. Store overrides in Firestore for future reference.
 
-### 3. Progressive Merge
+### 3. Adaptive Thresholds
+
+Adjust confidence thresholds based on chunk count, audio quality, and historical accuracy. Learn from user feedback.
+
+### 4. Progressive Merge
 
 Start merging early chunks while later chunks still processing (reduces time to first view).
-
-### 4. Speaker Re-identification
-
-Currently, speaker IDs are preserved from chunks. Future: use voice embeddings to re-identify speakers across chunks (handles speaker ID mismatches).
 
 ## Related Documentation
 
@@ -266,9 +339,11 @@ Currently, speaker IDs are preserved from chunks. Future: use voice embeddings t
 ## Key Takeaways
 
 1. **Chunk artifacts** store intermediate results in `conversations/{id}/chunks/*`
-2. **Merge trigger** fires atomically when all chunks complete
-3. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
-4. **Idempotency** ensures safe retries and manual reruns
-5. **Status flow**: `chunking → merging → complete`
+2. **Speaker reconciliation** (parallel mode) matches speakers across chunks using name/topic/term signals
+3. **Merge trigger** fires atomically when all chunks complete
+4. **Deduplication** uses "preferred chunk" logic (later chunk wins in overlaps)
+5. **Idempotency** ensures safe retries and manual reruns
+6. **Confidence threshold** (0.6) prevents low-quality speaker matches
+7. **Status flow**: `chunking → merging → complete`
 
-The merge layer is the final step that transforms chunked processing back into a seamless user experience.
+The merge layer is the final step that transforms chunked processing back into a seamless user experience, with speaker reconciliation ensuring consistent identities across chunk boundaries.

@@ -77,6 +77,9 @@ export interface Conversation {
   alignmentError?: string; // Error message if alignment failed (for fallback status)
   // Processing mode for chunked uploads (defaults to 'parallel' for new uploads)
   processingMode?: ProcessingMode;
+  // Speaker reconciliation metadata (parallel mode only)
+  reconciliationConfidence?: number;
+  reconciliationDetails?: ReconciliationDetails;
 
   // Progressive processing status (all optional for backward compatibility)
   processingProgress?: ProcessingProgress;
@@ -256,4 +259,31 @@ export interface ChunkPipelineResult {
   segmentCount: number;
   /** Last timestamp processed in this chunk (ms) */
   lastTimestampMs: number;
+}
+
+// =============================================================================
+// Speaker Reconciliation Types (Parallel Mode)
+// =============================================================================
+
+/**
+ * Detailed match evidence for speaker reconciliation.
+ * Provides transparency into how speakers were matched across chunks.
+ */
+export interface ReconciliationDetails {
+  /** Number of clusters (canonical speakers) created */
+  clusterCount: number;
+  /** Total number of original speakers across all chunks */
+  originalSpeakerCount: number;
+  /** Per-cluster match evidence */
+  clusters: Array<{
+    canonicalId: string;
+    originalIds: string[];
+    confidence: number;
+    displayName: string;
+    matchEvidence: {
+      nameMatches: number;
+      topicOverlap: number;
+      termOverlap: number;
+    };
+  }>;
 }
